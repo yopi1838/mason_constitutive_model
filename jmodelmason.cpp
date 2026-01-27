@@ -859,7 +859,6 @@ namespace jmodels
         }
         // Compressive cap "failure" flag: when dc is near fully damaged in compression
         const bool compflag = (dc >= 0.99);
-        double dilation_c_step = 0.0;
         // shear force
         if (!tenflag && !compflag)
         {
@@ -934,7 +933,12 @@ namespace jmodels
                     // keep phi fixed (no frictional softening when dilatancy governs the weakening)
                     phi_eff_deg = phi_peak_deg;
                     psi0_eff_deg = std::atan(tan_psi_eff) / dDegRad;
-
+                    double dusm = s->shear_disp_inc_.mag();
+                    if (ddil > 0.0 || dc == 0.0) {
+                        un_dilatant += tan_psi_eff * dusm;
+                        const double dfn_dil = kn_ * s->area_ * tan_psi_eff * dusm;
+                        s->normal_force_ += dfn_dil; // apply ONCE
+                    }
                 }
                 else {
                     // --- NO dilatancy: apply ds-based frictional softening (Option B) ---
@@ -966,20 +970,9 @@ namespace jmodels
                 double rat = 0.0;
                 if (fsm > 1e-30) rat = std::clamp(fsmax / fsm, 0.0, 1.0);
 
-                // Plastic part of shear increment (approx.)
-                const double slip_frac = std::clamp(1.0 - rat, 0.0, 1.0);
-                const double dusm_pl = slip_frac * s->shear_disp_inc_.mag();
-
                 // Apply shear projection
                 shearCorrection(s, &IPlas, fsm, fsmax, usel);
 
-                // Apply dilatancy normal pumping ONLY from plastic slip, and only if dilation active
-                if (dilation_ && dc == 0.0 && dilation_c_step > 0.0 && dusm_pl > 0.0)
-                {
-                    un_dilatant += dilation_c_step * dusm_pl;
-                    const double dfn_dil = kn_ * s->area_ * dilation_c_step * dusm_pl;
-                    s->normal_force_ += dfn_dil;
-                }
 
                 // Now cap-check using the updated normal force
                 if (s->normal_disp_ < 0.0) {
