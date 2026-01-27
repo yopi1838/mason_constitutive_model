@@ -1,0 +1,158 @@
+#ifdef _WIN32
+#pragma warning(disable : 4275)
+#pragma warning(disable : 4459)
+#endif
+
+#ifdef example_LIB
+#  define example_EXPORT EXPORT_TAG
+#elif defined(NO_MODEL_IMPORT)
+#  define example_EXPORT
+#else
+#ifndef NEWC
+#define NEWC(T) new T
+#endif
+
+#  define example_EXPORT IMPORT_TAG
+#endif
+
+#include "jointmodel.h"
+
+namespace jmodels
+{
+    
+    class JModelMason : public JointModel {
+    public:
+        JModelMason();
+        // Destructor, called when contact is deleted: free allocated memory, etc.
+        virtual ~JModelMason();
+        virtual string         getName() const;
+        virtual string         getPluginName() const { return getName(); }
+        virtual string         getFullName() const;
+        virtual uint32         getMinorVersion() const;
+        virtual string         getProperties() const;
+        virtual string         getStates() const;
+        virtual base::Property getProperty(uint32 index) const;
+        virtual void           setProperty(uint32 index, const base::Property& p, uint32 restoreVersion = 0);
+        virtual JModelMason* clone() const { return new JModelMason(); }
+        virtual double getMaxNormalStiffness() const override {
+            return std::max(kn_, kn_initial_);
+        }
+        virtual double         getMaxShearStiffness() const { return ks_; }
+        virtual void           copy(const JointModel* mod);
+        virtual void           run(uint32 dim, State* s); // If !isValid(dim) calls initialize(dim,s)
+        virtual void           initialize(uint32 dim, State* s); // calls setValid(dim)    
+        virtual double         solveQuadratic(double, double, double);
+        virtual void           compCorrection(State* s, uint32* IPlasticity, double& comp);
+        virtual void           shearCorrection(State* s, uint32* IPlasticity, double& fsm, double& fsmax, double& usel);
+        virtual bool           tensionCorrection(State* s, uint32* IPlasticity, double& ten, bool& tenflag);
+        
+        // Enumerator for the energies.
+        enum EnergyKeys {
+            kwETension = 1
+			, kwECompression
+            , kwEShear
+        };
+        //Energy calculations
+        string  getEnergies() const {
+            return "energy-tension"
+                ",energy-compression"
+                ",energy-shear";
+        }
+        // Activate the energy. This is only called if the energy tracking is enabled. 
+        void     activateEnergy() override { if (energies_) return; energies_ = new Energies(); }
+        // Returns the value of the energy (base 1 - getEnergy(1) returns the estrain energy).
+        double   getEnergy(uint32 i) const override;
+        // Returns whether or not each energy is accumulated (base 1 - getEnergyAccumulate(1) 
+        // returns wther or not the estrain energy is accumulated which is false).
+        bool     getEnergyAccumulate(uint32 i) const override;
+        // Set an energy value (base 1 - setEnergy(1) sets the estrain energy).
+        void     setEnergy(uint32 i, const double& d) override; // Base 1
+        // Activate the energy. This is only called if the energy tracking is enabled. 
+        // Returns whether or not the energy tracking has been enabled for this contact.
+        bool     getEnergyActivated() const override { return (energies_ != 0); }
+        //Check if the model has energies
+		bool hasEnergies() const { return energies_ ? true: false; }
+		double etension() const { return hasEnergies() ? energies_->etension_ : 0.0; }
+        void etension(const double& d) { if (!hasEnergies()) return; energies_->etension_ = d; }
+        double ecompression() const { return hasEnergies() ? energies_->ecompression_ : 0.0; }
+        void ecompression(const double& d) { if (!hasEnergies()) return; energies_->ecompression_ = d; }
+        double eshear() const { return hasEnergies() ? energies_->eshear_ : 0.0; }
+        void eshear(const double& d) { if (!hasEnergies()) return; energies_->eshear_ = d; }
+        
+        // Optional 
+        virtual double         getStrengthStressRatio(const double&, const DVect3&) const { return 10.0; }
+        virtual void           scaleProperties(const double&, const std::vector<uint32>&) {
+            throw std::runtime_error("Does not support property scaling");
+        }
+        virtual bool           supportsStrengthStressRatio() const { return false; }
+        virtual bool           supportsPropertyScaling() const { return false; }
+    private:
+        double kn_;
+        double kn_initial_; //Initial value of the normal stiffness
+        double ks_;
+        double cohesion_;
+        double compression_;
+        double friction_;
+        double dilation_;
+        double tension_;
+        double s_zero_dilation_; //zero dilation stress
+        double res_cohesion_;
+        double res_friction_;
+        double res_tension_;
+        double tan_friction_;
+        double tan_dilation_;
+        double tan_res_friction_;
+        double G_I; //first mode fracture energy
+        double G_II; //Second mode fracture energy
+        double G_c; //Compressive fracture energy
+        double dt = 0.0; // tensile damage parameter
+        double dc = 0.0; // Compressive damage parameter
+        double ds = 0.0; // shear damage parameter
+        double d_ts;
+        double cc; //Softening part of shear strength
+        string dtTable_, dsTable_; //damage parameter tables
+        double tP_; //plastic tensile displacement
+        double sP_; //plastic shear displacement
+        double Cnn; //Cap user defined parameter in normal direction
+        double Css; //Cap user defined parameter in shear direction
+        double Cn; //Cap user defined parameter for center of ellipsis
+        void* iTension_d_ = nullptr;
+        void* iShear_d_ = nullptr;
+        void* iHard_d_ = nullptr;
+        double  R_yield;
+        double  R_violates;
+        double fc_current;
+        double res_comp_;
+        double friction_current_; //Current friction angle
+        double n_; //Ratio between the elastic displacement to compressive strength
+        double m_; //Ratio between ultimate displacement to displacement at peak compressive strength
+        double uel_; //The elastic limit in tension
+        double un_hist_comp; // The maximum current displacement
+        double peak_normal; //The current peaks in compression   
+        double ds_hist;
+        double un_ro;//reloading displacement
+        double fm_ro; //reloading stress
+        double un_hist_ten;
+        double reloadFlag; //reloading flag
+        uint32 plasFlag;
+        double dc_hist;
+        uint32 pertFlag;
+        double dt_hist;
+        double delta; //dilatancy gradient
+        double dilation_current;
+        double un_dilatant;
+        double dil_hist;
+        double ddil;
+
+        // Structure to store the energies. 
+        struct Energies {
+            Energies() : etension_(0.0),ecompression_(0.0), eshear_(0.0) {}
+			double etension_;  // tensile elastic energy stored in contact
+			double ecompression_;  // compression elastic energy stored in contact
+			double eshear_;    // shear elastic energy stored in contact
+        };
+        Energies* energies_ = nullptr; // The energies
+    };
+} // namespace models
+
+// EOF

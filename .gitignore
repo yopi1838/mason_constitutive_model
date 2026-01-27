@@ -39,3 +39,7 @@
 
 # debug information files
 *.dwo
+.vs/
+*.user
+*.userosscache*.sln.docstates
+*.suo

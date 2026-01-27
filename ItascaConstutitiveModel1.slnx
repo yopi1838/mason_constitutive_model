@@ -1,0 +1,10 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="InternalTest" />
+    <BuildType Name="InternalTestDebug" />
+    <BuildType Name="Release" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="ItascaConstutitiveModel1.vcxproj" Id="03baa91a-53b9-437b-8afe-b87d96a78789" />
+</Solution>
