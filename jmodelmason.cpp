@@ -478,7 +478,7 @@ namespace jmodels
             s->working_[Dqt] = 0.0;
             //s->working_[Dqkn] = 0.0;
             s->working_[Dqc] = 0.0;
-            s->working_[5] = 0.0;
+            //s->working_[5] = 0.0;
         }
         double ucel_ = n_ * compression_ / kn_comp_;
 
@@ -495,7 +495,7 @@ namespace jmodels
 
         double sn_ = fn_old / s->area_;
         double dsn_ = (fn_new - fn_old) / s->area_;
-
+       
         constexpr double kEps = std::numeric_limits<double>::epsilon();
 
         //Calculate elastic limit
@@ -514,32 +514,39 @@ namespace jmodels
         //   -1.0 => tension branch
         //    0.0 => uninitialized (first step)
         // u_eps = F_tol / (k_n * A)
-        const double F_tol = 1e-6 * std::max(1.0, std::abs(fn_old));  // example
-        const double u_eps = std::max(1e-12, F_tol / (kn_comp_ * s->area_));
+        const double F_tol = 1e-6 * std::max(1.0, std::abs(fn_old));
+        const double u_eps_force = std::max(1e-16, F_tol / (kn_comp_ * s->area_));
+        const double u_eps_min = 1e-4 * std::max(ucel_, 1e-12);  // tune 1e-5..1e-3
+        const double u_eps = std::max(u_eps_min, u_eps_force);
+
         double prev_branch = s->working_[5];
-        if (prev_branch == 0.0) prev_branch = (un_current >= 0.0) ? 1.0 : -1.0;
+        if (prev_branch == 0.0) prev_branch = (un_new >= 0.0) ? 1.0 : -1.0;
 
         if (prev_branch > 0.0) {
-            if (un_current < -u_eps) prev_branch = -1.0;
+            if (un_new < -u_eps) prev_branch = -1.0;
         }
         else {
-            if (un_current > +u_eps) prev_branch = +1.0;
+            if (un_new > +u_eps) prev_branch = +1.0;
         }
         s->working_[5] = prev_branch;
 
         // --- TENSION / COMPRESSION BRANCH ------------------------------------
-        // Opening (dn_ < 0) = loading; Closing (dn_ > 0) = unloading (secant)
         if (prev_branch < 0.0) {
             // --- TENSION BRANCH ---
-            // update tensile history as before
-            if (dn_ < 0.0 && un_current <= un_hist_ten) {
-                un_hist_ten = un_current;  // or un_new; same as your original intent
+            // Update history based on the NEW displacement to prevent 1-step lag
+            if (un_new < un_hist_ten) {
+                un_hist_ten = un_new;
                 s->working_[D_un_hist] = un_hist_ten;
             }
-            // compute the tensile increment using kn_
-            const double kna_t = kn_ * s->area_;  // kn_ may have been degraded by damage
-            double dfn_t = kna_t * dn_;     // Fn in tension
-            fn_new += dfn_t;                   // <-- THIS is what must exist            
+
+            // Use TOTAL SECANT force evaluation to prevent incremental drift/overshoot.
+            // un_new is negative in tension, kn_ is always positive, so fn_new is negative.
+            if (un_new < 0.0) {
+                fn_new = kn_ * s->area_ * un_new;
+            }
+            else {
+                fn_new = kn_initial_ * s->area_ * un_new; // If pushed back closed
+            }
         }
         else {//COMPRESSION BRANCH --------------------------------------------------
             // Update unloading history
@@ -553,8 +560,7 @@ namespace jmodels
 
                 if (un_current <= uel_limit) {
                     // Purely elastic loading
-                    double dfn = kna_el * dn_;
-                    fn_new += dfn;
+                    fn_new = kn_comp_ * s->area_ * un_new;
                     fc_current = fn_new / s->area_;
                     peak_normal = fc_current;
                 }
@@ -580,10 +586,9 @@ namespace jmodels
                     }
                     else {
                         // Go to the envelope stress, but do it smoothly to avoid
-                        // discontinuous force "kicks" that excite high-frequency ringing.
+                        // Direct envelope evaluation prevents energy build-up and lag
                         const double fn_env = fenv * s->area_;
-                        const double alpha_env = 0.25; // relaxation factor (0..1)
-                        fn_new = fn_new + alpha_env * (fn_env - fn_new);
+                        fn_new = fn_env;
                     }
 
                     fc_current = fn_new / s->area_;
@@ -594,7 +599,7 @@ namespace jmodels
             // ---------------- Unloading / reloading in compression -------------
             else {
                 // Unloading in compression
-                double mult = (dc > 0.0) ? 3.0 : 1.0;
+                double mult = (dc > 0.0) ? 5.0 : 1.0;
                 double r = un_hist_comp / ucel_;
                 double un_plastic_rat = 0.47 * mult * r * r + 0.5 * mult * r;                
                 double un_plastic = un_plastic_rat * ucel_;
@@ -618,8 +623,8 @@ namespace jmodels
                         double Xeta = (un_new - un_hist_comp) / denom_X;
 
                         //// clamp Xeta to avoid extreme stiffness / non-objective spikes
-                        //if (Xeta < -5.0) Xeta = -5.0;
-                        //else if (Xeta > 5.0) Xeta = 5.0;
+                        if (Xeta < -5.0) Xeta = -5.0;
+                        else if (Xeta > 5.0) Xeta = 5.0;
 
 
                         double B1 = k1 / Es;
@@ -661,8 +666,7 @@ namespace jmodels
                         // purely elastic unloading from peak
                         fm_ro = 0.0;
                         reloadFlag = 0;
-                        double dfn = kn_comp_ * s->area_ * dn_;
-                        fn_new += dfn;
+                        fn_new = kn_comp_ * s->area_ * un_new;
                         fc_current = fn_new / s->area_;
                     }
                 }
@@ -670,7 +674,6 @@ namespace jmodels
                     // Reloading branch
                     if (reloadFlag == 1 && dn_ >= 0.0) {
                         double denom = un_hist_comp - un_ro;
-                        double fm_re = 0.0;
 
                         const double eps_denom = 1e-6 * std::max(ucel_, std::abs(un_hist_comp));
                         if (std::abs(denom) < eps_denom) denom = (denom >= 0.0 ? eps_denom : -eps_denom);
@@ -681,16 +684,11 @@ namespace jmodels
                             ? 1.0 / (1.0 + 0.20 * std::sqrt(un_rec_nz))
                             : 1.0 / (1.0 + 0.35 * std::pow(un_rec_nz, 0.2));
                         double k_re = (beta * peak_normal - fm_ro) / denom;
+
+                        // Never allow reloading tangent to exceed elastic stiffness.
                         k_re = std::clamp(k_re, 0.0, kn_comp_);
-                        
-                        if (std::abs(denom) < 1e-12) {
-                            k_re = kn_comp_;
-                            fm_re = fm_ro;
-                        }
-                        else {
-                            k_re = (beta * peak_normal - fm_ro) / denom;
-                            fm_re = fm_ro + k_re * (un_new - un_ro);
-                        }
+
+                        double fm_re = fm_ro + k_re * (un_new - un_ro);
 
                         if (dc > 0.0) {
                             // damaged compression cap
@@ -717,9 +715,10 @@ namespace jmodels
                                 fc_current = fm_re;
                             }
                             else {
+                                // NEW CODE
+                                // Lock directly onto the compressive envelope
                                 const double fn_env = fc_env * s->area_;
-                                const double alpha_env = 0.25;     // tune 0.1–0.5
-                                fn_new = fn_new + alpha_env * (fn_env - fn_new);
+                                fn_new = fn_env;
                                 fc_current = fc_env;
                                 reloadFlag = 0;
                             }
@@ -729,10 +728,10 @@ namespace jmodels
                     }
                     else {
                         // Purely elastic unloading
-                        double dfn = kn_comp_ * s->area_ * dn_;
-                        fn_new += dfn;
-                        fc_current = fn_new / s->area_;
+                        fm_ro = 0.0;
                         reloadFlag = 0;
+                        fn_new = kn_comp_ * s->area_ * un_new;
+                        fc_current = fn_new / s->area_;
                     } //unloading  
                 }
             }
@@ -824,28 +823,28 @@ namespace jmodels
             d_ts = clampDamage(dt + ds - dt * ds);
             if (!std::isfinite(d_ts)) d_ts = 0.0;
             // use secant-to-origin stiffness referenced to the initial elastic kn_initial_
-            // Tension softening guard
+            // Stabilised for dynamics: avoid kn_ spikes when un_hist_ten is near zero.
             double uel_t = tension_ / kn_initial_;
-            if (un_current < (-uel_t)) {
+
+            // Evaluate if it has ever yielded, ensuring we track damage even during unloading/stationary phases
+            if (un_new < (-uel_t) || un_hist_ten < (-uel_t)) {
                 const double eps_u = 1e-9;
+                const double kn_min = std::max(1e-12, 1e-6 * kn_initial_);
+                const double kn_max = std::max(kn_min, 1.0 * kn_initial_);
 
-                // choose clamp bounds (unit-consistent)
-                const double kn_min = std::max(1e-12, 1e-6 * kn_initial_); // >0 floor
-                const double kn_max = std::max(kn_min, 1.0 * kn_initial_); // cap
-                if (sign) {
-                    // protect denominator and compute candidate stiffness
-                    const double denom = std::max(std::abs(un_hist_ten), eps_u);
-                    double kn_cand = tension_ * (1.0 - d_ts) / denom;
+                // Removed the 'if (sign)' wrapper so shear-induced damage (ds) 
+                // immediately degrades normal stiffness, even if dn_ >= 0.
+                const double denom = std::max(std::abs(un_hist_ten), eps_u);
+                double kn_cand = tension_ * (1.0 - d_ts) / denom;
 
-                    // sanitize
-                    if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
-                        kn_ = kn_min;
-                    }
-                    else {
-                        kn_ = std::clamp(kn_cand, kn_min, kn_max);
-                    }
+                if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
+                    kn_ = kn_min;
+                }
+                else {
+                    kn_ = std::clamp(kn_cand, kn_min, kn_max);
                 }
             }
+                
         }
         const double dts_eps = 1e-6; // practical threshold for "fully damaged"
         const double dts_eff = std::min(std::max(d_ts, 0.0), 1.0);

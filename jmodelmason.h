@@ -35,7 +35,7 @@ namespace jmodels
         virtual void           setProperty(uint32 index, const base::Property& p, uint32 restoreVersion = 0);
         virtual JModelMason* clone() const { return new JModelMason(); }
         virtual double getMaxNormalStiffness() const override {
-            return std::max(kn_, kn_initial_);
+            return kn_;
         }
         virtual double         getMaxShearStiffness() const { return ks_; }
         virtual void           copy(const JointModel* mod);
