@@ -560,7 +560,8 @@ namespace jmodels
 
                 if (un_current <= uel_limit) {
                     // Purely elastic loading
-                    fn_new = kn_comp_ * s->area_ * un_new;
+                    double dfn = kna_el * dn_;
+                    fn_new += dfn;
                     fc_current = fn_new / s->area_;
                     peak_normal = fc_current;
                 }
@@ -576,7 +577,7 @@ namespace jmodels
                         };
                     double fenv = fel_limit + (fpeak - fel_limit) * safe_sqrt_expr(x_new); // stress
 
-                    const double denom_un = std::max(un_current, 1e-12);  // assuming un_current>=0 in compression branch
+                    const double denom_un = un_current;  // assuming un_current>=0 in compression branch
                     double k_trial = fenv / denom_un;
 
                     if (k_trial >= kn_comp_) {
@@ -587,8 +588,7 @@ namespace jmodels
                     else {
                         // Go to the envelope stress, but do it smoothly to avoid
                         // Direct envelope evaluation prevents energy build-up and lag
-                        const double fn_env = fenv * s->area_;
-                        fn_new = fn_env;
+                        fn_new = fenv * s->area_;
                     }
 
                     fc_current = fn_new / s->area_;
@@ -604,7 +604,11 @@ namespace jmodels
                 double un_plastic_rat = 0.47 * mult * r * r + 0.5 * mult * r;                
                 double un_plastic = un_plastic_rat * ucel_;
                 if (dn_ < 0.0 && (plasFlag == 1)) { // unloading from compression
-                    if (sn_ + dsn_ > 0.0) {
+                    if (un_current >= un_hist_comp * 0.985)
+                        pertFlag = 2;
+                    else
+                        pertFlag = 0;
+                    if (sn_ + dsn_ > 0.0 && (pertFlag == 0)) {
                         // Nonlinear unloading (Xeta curve)
                         double k1 = 1.5 * kn_comp_;
                         double k2 = 0.15 * kn_comp_ / std::pow(1.0 + (un_hist_comp / ucel_), 2);
@@ -650,13 +654,13 @@ namespace jmodels
 
                         // record for reloading
                         reloadFlag = 1;
-                        un_ro = un_new;
+                        un_ro = un_current;
                         fm_ro = fm;
                     }
                     else if (sn_ + dsn_ < 0.0) {
                         // unload all the way to zero
                         fm_ro = 0.0;                        
-                        un_ro = un_new;     // set anchor                        
+                        un_ro = un_current;     // set anchor                        
                         reloadFlag = 1;
                         fn_new += 0.0;
                         fc_current = 0.0;
@@ -666,29 +670,38 @@ namespace jmodels
                         // purely elastic unloading from peak
                         fm_ro = 0.0;
                         reloadFlag = 0;
-                        fn_new = kn_comp_ * s->area_ * un_new;
-                        fc_current = fn_new / s->area_;
+                        double dfn = kn_comp_ * s->area_ * dn_;
+                        fn_new += dfn;
                     }
                 }
                 else {
                     // Reloading branch
                     if (reloadFlag == 1 && dn_ >= 0.0) {
-                        double denom = un_hist_comp - un_ro;
+                        double denom = un_hist_comp;
+                        if (un_ro != 0.0)
+                            denom = un_hist_comp - un_ro;
 
-                        const double eps_denom = 1e-6 * std::max(ucel_, std::abs(un_hist_comp));
-                        if (std::abs(denom) < eps_denom) denom = (denom >= 0.0 ? eps_denom : -eps_denom);
+                        double k_re = kn_initial_;
+                        double fm_re = 0.0;
+                        double beta = 1.0;
 
                         double un_rec = (un_hist_comp - un_ro) / ucel_;
                         double un_rec_nz = std::max(0.0, un_rec);
-                        double beta = (un_hist_comp < ucel_)
-                            ? 1.0 / (1.0 + 0.20 * std::sqrt(un_rec_nz))
-                            : 1.0 / (1.0 + 0.35 * std::pow(un_rec_nz, 0.2));
-                        double k_re = (beta * peak_normal - fm_ro) / denom;
+                        if (un_hist_comp < ucel_) {
+                            beta = 1.0 / (1.0 + 0.20 * std::sqrt(un_rec_nz));
+                        }
+                        else {
+                            beta = 1.0 / (1.0 + 0.35 * std::pow(un_rec_nz, 0.2));
+                        }
 
-                        // Never allow reloading tangent to exceed elastic stiffness.
-                        k_re = std::clamp(k_re, 0.0, kn_comp_);
-
-                        double fm_re = fm_ro + k_re * (un_new - un_ro);
+                        if (std::abs(denom) < 1e-12) {
+                            k_re = kn_comp_;
+                            fm_re = fm_ro;
+                        }
+                        else {
+                            k_re = (beta * peak_normal - fm_ro) / denom;
+                            fm_re = fm_ro + k_re * (un_current - un_ro);
+                        }
 
                         if (dc > 0.0) {
                             // damaged compression cap
@@ -730,8 +743,8 @@ namespace jmodels
                         // Purely elastic unloading
                         fm_ro = 0.0;
                         reloadFlag = 0;
-                        fn_new = kn_comp_ * s->area_ * un_new;
-                        fc_current = fn_new / s->area_;
+                        double dfn = kn_comp_ * s->area_ * dn_;
+                        fn_new += dfn;
                     } //unloading  
                 }
             }
@@ -834,14 +847,16 @@ namespace jmodels
 
                 // Removed the 'if (sign)' wrapper so shear-induced damage (ds) 
                 // immediately degrades normal stiffness, even if dn_ >= 0.
-                const double denom = std::max(std::abs(un_hist_ten), eps_u);
-                double kn_cand = tension_ * (1.0 - d_ts) / denom;
+                if (sign) {
+                    const double denom = std::max(std::abs(un_hist_ten), eps_u);
+                    double kn_cand = tension_ * (1.0 - d_ts) / denom;
 
-                if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
-                    kn_ = kn_min;
-                }
-                else {
-                    kn_ = std::clamp(kn_cand, kn_min, kn_max);
+                    if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
+                        kn_ = kn_min;
+                    }
+                    else {
+                        kn_ = std::clamp(kn_cand, kn_min, kn_max);
+                    }
                 }
             }
                 
