@@ -498,55 +498,27 @@ namespace jmodels
        
         constexpr double kEps = std::numeric_limits<double>::epsilon();
 
-        //Calculate elastic limit
+        //Calculate elastic limit      
         double fel_limit = compression_ / 5.0;
         double fpeak = compression_;
-        
-        // --- NORMAL BRANCH SELECTION (ANTI-CHATTER DEAD-BAND) -----------------
-        // In shake-table / rocking simulations, un_current can hover around 0 and
-        // repeatedly toggle between tension and compression laws, producing high-
-        // frequency normal-force chatter. We introduce a small displacement dead-
-        // band with hysteretic switching: keep the previous branch while
-        // |un_current| < u_eps, and switch only after crossing +/- u_eps.
-        //
-        // We store the previous branch in s->working_[5]:
-        //   +1.0 => compression branch
-        //   -1.0 => tension branch
-        //    0.0 => uninitialized (first step)
-        // u_eps = F_tol / (k_n * A)
-        const double F_tol = 1e-6 * std::max(1.0, std::abs(fn_old));
-        const double u_eps_force = std::max(1e-16, F_tol / (kn_comp_ * s->area_));
-        const double u_eps_min = 1e-4 * std::max(ucel_, 1e-12);  // tune 1e-5..1e-3
-        const double u_eps = std::max(u_eps_min, u_eps_force);
+        //double ftemp = 0.0;        
 
-        double prev_branch = s->working_[5];
-        if (prev_branch == 0.0) prev_branch = (un_new >= 0.0) ? 1.0 : -1.0;
-
-        if (prev_branch > 0.0) {
-            if (un_new < -u_eps) prev_branch = -1.0;
-        }
-        else {
-            if (un_new > +u_eps) prev_branch = +1.0;
-        }
-        s->working_[5] = prev_branch;
-
-        // --- TENSION / COMPRESSION BRANCH ------------------------------------
-        if (prev_branch < 0.0) {
+        // --- TENSION BRANCH --------------------------------------------------
+        // Opening (dn_ < 0) = loading; Closing (dn_ > 0) = unloading (secant)        
+        if (un_current < 0.0) {
             // --- TENSION BRANCH ---
-            // Update history based on the NEW displacement to prevent 1-step lag
-            if (un_new < un_hist_ten) {
-                un_hist_ten = un_new;
+
+            // update tensile history as before
+            if (dn_ < 0.0 && un_current <= un_hist_ten) {
+                un_hist_ten = un_current;  // or un_new; same as your original intent
                 s->working_[D_un_hist] = un_hist_ten;
             }
 
-            // Use TOTAL SECANT force evaluation to prevent incremental drift/overshoot.
-            // un_new is negative in tension, kn_ is always positive, so fn_new is negative.
-            if (un_new < 0.0) {
-                fn_new = kn_ * s->area_ * un_new;
-            }
-            else {
-                fn_new = kn_initial_ * s->area_ * un_new; // If pushed back closed
-            }
+            // compute the tensile increment using kn_
+            const double kna_t = kn_ * s->area_;  // kn_ may have been degraded by damage
+            double dfn_t = kna_t * dn_;     // Fn in tension
+
+            fn_new += dfn_t;
         }
         else {//COMPRESSION BRANCH --------------------------------------------------
             // Update unloading history
@@ -672,6 +644,7 @@ namespace jmodels
                         reloadFlag = 0;
                         double dfn = kn_comp_ * s->area_ * dn_;
                         fn_new += dfn;
+                        fc_current = fn_new / s->area_;
                     }
                 }
                 else {
@@ -745,6 +718,7 @@ namespace jmodels
                         reloadFlag = 0;
                         double dfn = kn_comp_ * s->area_ * dn_;
                         fn_new += dfn;
+                        fc_current = fn_new / s->area_;
                     } //unloading  
                 }
             }
