@@ -1,4 +1,4 @@
-#include "jmodelmason.h"
+﻿#include "jmodelmason.h"
 #include "state.h"
 #include "version.txt"
 #include <algorithm>
@@ -157,10 +157,10 @@ namespace jmodels
         return("stiffness-normal       ,stiffness-initial    ,stiffness-shear        ,cohesion   ,compression  ,friction   ,dilation   ,"
             "tension   ,dilation-zero    ,cohesion-residual  ,friction-residual  , comp-residual ,"
             "tension-residual    , G_I   , G_II  ,dt ,ds ,dc ,d_ts   ,cc ,"
-            "table-dt    ,table-ds ,"
+            "table-dt    ,table-ds ,"       
             "tensile-disp-plastic    ,shear-disp-plastic ,"
             "G_c, Cn, Cnn, Css, fc_current,  fric_current,   peak_ratio, ult_ratio,uel,un_hist_comp,peak_normal,ds_hist,"
-            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,ksechist");
+            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag");
     }
 
     string JModelMason::getStates() const
@@ -503,6 +503,34 @@ namespace jmodels
         double fpeak = compression_;
         //double ftemp = 0.0;        
 
+        // --- PRE-UPDATE STIFFNESS FOR TENSION (before force calculation) ---
+        if (un_current < 0.0 && s->state_) {
+            // Update tensile history
+            if (dn_ < 0.0 && un_current <= un_hist_ten) {
+                un_hist_ten = un_current;
+                s->working_[D_un_hist] = un_hist_ten;
+            }
+
+            // Update tensile stiffness BEFORE computing forces
+            double uel_t = tension_ / kn_initial_;
+            if (un_new < (-uel_t) || un_hist_ten < (-uel_t)) {
+                const double eps_u = 1e-9;
+                const double kn_min = std::max(1e-12, 1e-6 * kn_initial_);
+                const double kn_max = std::max(kn_min, 1.0 * kn_initial_);
+
+                // Compute current combined damage (already available at this point from previous cycle)
+                const double d_ts_current = std::min(std::max(d_ts, 0.0), 1.0);
+                const double denom = std::max(std::abs(un_hist_ten), eps_u);
+                double kn_cand = tension_ * (1.0 - d_ts_current) / denom;
+
+                if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
+                    kn_ = kn_min;
+                } else {
+                    kn_ = std::clamp(kn_cand, kn_min, kn_max);
+                }
+            }
+        }
+
         // --- TENSION BRANCH --------------------------------------------------
         // Opening (dn_ < 0) = loading; Closing (dn_ > 0) = unloading (secant)        
         if (un_current < 0.0) {
@@ -571,16 +599,17 @@ namespace jmodels
             // ---------------- Unloading / reloading in compression -------------
             else {
                 // Unloading in compression
-                double mult = (dc > 0.0) ? 5.0 : 1.0;
+                // Smooth transition for plastic displacement multiplier instead of binary jump
+                double mult = (dc > 0.0) ? 2.5 : 1.0;
                 double r = un_hist_comp / ucel_;
                 double un_plastic_rat = 0.47 * mult * r * r + 0.5 * mult * r;                
                 double un_plastic = un_plastic_rat * ucel_;
                 if (dn_ < 0.0 && (plasFlag == 1)) { // unloading from compression
-                    if (un_current >= un_hist_comp * 0.985)
-                        pertFlag = 2;
-                    else
-                        pertFlag = 0;
-                    if (sn_ + dsn_ > 0.0 && (pertFlag == 0)) {
+                    // Smooth transition instead of sharp threshold at 98.5%
+                    double prox_ratio = un_current / (un_hist_comp * 0.985);
+                    double smooth_pert = std::min(1.0, std::max(0.0, (prox_ratio - 0.98) / 0.04)); // 0→1 over 98%-102%
+
+                    if (sn_ + dsn_ > 0.0 && (smooth_pert < 0.5)) { // use midpoint instead of binary flag
                         // Nonlinear unloading (Xeta curve)
                         double k1 = 1.5 * kn_comp_;
                         double k2 = 0.15 * kn_comp_ / std::pow(1.0 + (un_hist_comp / ucel_), 2);
@@ -656,16 +685,17 @@ namespace jmodels
 
                         double k_re = kn_initial_;
                         double fm_re = 0.0;
-                        double beta = 1.0;
 
                         double un_rec = (un_hist_comp - un_ro) / ucel_;
                         double un_rec_nz = std::max(0.0, un_rec);
-                        if (un_hist_comp < ucel_) {
-                            beta = 1.0 / (1.0 + 0.20 * std::sqrt(un_rec_nz));
-                        }
-                        else {
-                            beta = 1.0 / (1.0 + 0.35 * std::pow(un_rec_nz, 0.2));
-                        }
+
+                        // Smooth transition for beta instead of sharp threshold
+                        double ratio = un_hist_comp / ucel_;
+                        double blend = 0.5 * (1.0 + std::tanh(10.0 * (ratio - 1.0))); // smooth 0→1 around ucel_
+
+                        double beta1 = 1.0 / (1.0 + 0.20 * std::sqrt(un_rec_nz));
+                        double beta2 = 1.0 / (1.0 + 0.35 * std::pow(un_rec_nz, 0.2));
+                        double beta = beta1 * (1.0 - blend) + beta2 * blend;
 
                         if (std::abs(denom) < 1e-12) {
                             k_re = kn_comp_;
@@ -686,6 +716,8 @@ namespace jmodels
                             else {
                                 reloadFlag = 0;
                                 jumptoDC = true;
+                                fn_new = fc_env * s->area_; // FIX: Lock to envelope
+                                fc_current = fc_env;        // FIX: Lock to envelope
                             }
                         }
                         else {
@@ -809,31 +841,8 @@ namespace jmodels
             dt_hist = clampDamage(dt_hist);
             d_ts = clampDamage(dt + ds - dt * ds);
             if (!std::isfinite(d_ts)) d_ts = 0.0;
-            // use secant-to-origin stiffness referenced to the initial elastic kn_initial_
-            // Stabilised for dynamics: avoid kn_ spikes when un_hist_ten is near zero.
-            double uel_t = tension_ / kn_initial_;
-
-            // Evaluate if it has ever yielded, ensuring we track damage even during unloading/stationary phases
-            if (un_new < (-uel_t) || un_hist_ten < (-uel_t)) {
-                const double eps_u = 1e-9;
-                const double kn_min = std::max(1e-12, 1e-6 * kn_initial_);
-                const double kn_max = std::max(kn_min, 1.0 * kn_initial_);
-
-                // Removed the 'if (sign)' wrapper so shear-induced damage (ds) 
-                // immediately degrades normal stiffness, even if dn_ >= 0.
-                if (sign) {
-                    const double denom = std::max(std::abs(un_hist_ten), eps_u);
-                    double kn_cand = tension_ * (1.0 - d_ts) / denom;
-
-                    if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
-                        kn_ = kn_min;
-                    }
-                    else {
-                        kn_ = std::clamp(kn_cand, kn_min, kn_max);
-                    }
-                }
-            }
-                
+            // Note: Stiffness kn_ is now updated BEFORE force calculation (see above)
+            // to avoid one-cycle lag and ensure consistency during cyclic loading
         }
         const double dts_eps = 1e-6; // practical threshold for "fully damaged"
         const double dts_eff = std::min(std::max(d_ts, 0.0), 1.0);
@@ -938,9 +947,13 @@ namespace jmodels
                     phi_eff_deg = phi_peak_deg;
                     psi0_eff_deg = std::atan(tan_psi_eff) / dDegRad;
                     double dusm = s->shear_disp_inc_.mag();
-                    if (ddil > 0.0 || dc == 0.0) {
-                        un_dilatant += tan_psi_eff * dusm;
-                        const double dfn_dil = kn_ * s->area_ * tan_psi_eff * dusm;
+
+                    // Smoothly degrade dilatancy with compressive damage instead of abrupt shutoff
+                    double dil_factor = (ddil > 0.0) ? 1.0 : (1.0 - dc);
+                    if (dil_factor > 0.0) {
+                        double effective_tan_psi = tan_psi_eff * dil_factor;
+                        un_dilatant += effective_tan_psi * dusm;
+                        const double dfn_dil = kn_ * s->area_ * effective_tan_psi * dusm;
                         s->normal_force_ += dfn_dil; // apply ONCE
                     }
                 }
@@ -1041,7 +1054,7 @@ namespace jmodels
                 energies_->etension_ += dWn;
             }
 
-            // Incremental shear work: fs � du_s
+            // Incremental shear work: fs · du_s
             const double dWs =
                 fs_mean.x() * du_s.x() +
                 fs_mean.y() * du_s.y() +
