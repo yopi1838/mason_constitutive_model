@@ -131,20 +131,20 @@ namespace jmodels
 
     string JModelMason::getName() const
     {
-        #ifdef JMODELDEBUG
-                return "masond";
-        #else
-                return "mason";
-        #endif
+#ifdef JMODELDEBUG
+        return "masond";
+#else
+        return "mason";
+#endif
     }
 
     string JModelMason::getFullName() const
     {
-        #ifdef JMODELDEBUG
-                return "Mason Debug";
-        #else
-                return "Mason";
-        #endif
+#ifdef JMODELDEBUG
+        return "Mason Debug";
+#else
+        return "Mason";
+#endif
     }
 
     uint32 JModelMason::getMinorVersion() const
@@ -157,10 +157,10 @@ namespace jmodels
         return("stiffness-normal       ,stiffness-initial    ,stiffness-shear        ,cohesion   ,compression  ,friction   ,dilation   ,"
             "tension   ,dilation-zero    ,cohesion-residual  ,friction-residual  , comp-residual ,"
             "tension-residual    , G_I   , G_II  ,dt ,ds ,dc ,d_ts   ,cc ,"
-            "table-dt    ,table-ds ,"       
+            "table-dt    ,table-ds ,"
             "tensile-disp-plastic    ,shear-disp-plastic ,"
             "G_c, Cn, Cnn, Css, fc_current,  fric_current,   peak_ratio, ult_ratio,uel,un_hist_comp,peak_normal,ds_hist,"
-            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag");
+            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,ksechist");
     }
 
     string JModelMason::getStates() const
@@ -478,7 +478,7 @@ namespace jmodels
             s->working_[Dqt] = 0.0;
             //s->working_[Dqkn] = 0.0;
             s->working_[Dqc] = 0.0;
-            //s->working_[5] = 0.0;
+            s->working_[5] = 0.0;
         }
         double ucel_ = n_ * compression_ / kn_comp_;
 
@@ -495,10 +495,10 @@ namespace jmodels
 
         double sn_ = fn_old / s->area_;
         double dsn_ = (fn_new - fn_old) / s->area_;
-       
+
         constexpr double kEps = std::numeric_limits<double>::epsilon();
 
-        //Calculate elastic limit      
+        //Calculate elastic limit
         double fel_limit = compression_ / 5.0;
         double fpeak = compression_;
         //double ftemp = 0.0;        
@@ -546,7 +546,7 @@ namespace jmodels
             const double kna_t = kn_ * s->area_;  // kn_ may have been degraded by damage
             double dfn_t = kna_t * dn_;     // Fn in tension
 
-            fn_new += dfn_t;
+            fn_new += dfn_t;                   // <-- THIS is what must exist            
         }
         else {//COMPRESSION BRANCH --------------------------------------------------
             // Update unloading history
@@ -577,7 +577,7 @@ namespace jmodels
                         };
                     double fenv = fel_limit + (fpeak - fel_limit) * safe_sqrt_expr(x_new); // stress
 
-                    const double denom_un = un_current;  // assuming un_current>=0 in compression branch
+                    double denom_un = un_current;
                     double k_trial = fenv / denom_un;
 
                     if (k_trial >= kn_comp_) {
@@ -586,8 +586,7 @@ namespace jmodels
                         fn_new += dfn;
                     }
                     else {
-                        // Go to the envelope stress, but do it smoothly to avoid
-                        // Direct envelope evaluation prevents energy build-up and lag
+                        // go directly to envelope stress
                         fn_new = fenv * s->area_;
                     }
 
@@ -599,10 +598,9 @@ namespace jmodels
             // ---------------- Unloading / reloading in compression -------------
             else {
                 // Unloading in compression
-                // Smooth transition for plastic displacement multiplier instead of binary jump
                 double mult = (dc > 0.0) ? 2.5 : 1.0;
-                double r = un_hist_comp / ucel_;
-                double un_plastic_rat = 0.47 * mult * r * r + 0.5 * mult * r;                
+                double r = (un_hist_comp / ucel_);
+                double un_plastic_rat = 0.47 * mult * r * r + 0.5 * mult * r;
                 double un_plastic = un_plastic_rat * ucel_;
                 if (dn_ < 0.0 && (plasFlag == 1)) { // unloading from compression
                     // Smooth transition instead of sharp threshold at 98.5%
@@ -627,7 +625,7 @@ namespace jmodels
 
                         double Xeta = (un_new - un_hist_comp) / denom_X;
 
-                        //// clamp Xeta to avoid extreme stiffness / non-objective spikes
+                        // clamp Xeta to avoid extreme stiffness / non-objective spikes
                         if (Xeta < -5.0) Xeta = -5.0;
                         else if (Xeta > 5.0) Xeta = 5.0;
 
@@ -655,17 +653,15 @@ namespace jmodels
 
                         // record for reloading
                         reloadFlag = 1;
-                        un_ro = un_current;
                         fm_ro = fm;
+                        un_ro = un_current;
                     }
                     else if (sn_ + dsn_ < 0.0) {
                         // unload all the way to zero
-                        fm_ro = 0.0;                        
-                        un_ro = un_current;     // set anchor                        
+                        fm_ro = 0.0;
                         reloadFlag = 1;
                         fn_new += 0.0;
                         fc_current = 0.0;
-
                     }
                     else {
                         // purely elastic unloading from peak
@@ -678,24 +674,28 @@ namespace jmodels
                 }
                 else {
                     // Reloading branch
-                    if (reloadFlag == 1 && dn_ >= 0.0) {
+                    if (un_current < un_ro && dn_ >= 0.0) {
+                        // hold force; just flag reloading
+                        reloadFlag = 1;
+                        fc_current = fn_new / s->area_;
+                    }
+                    else if (reloadFlag == 1 && dn_ >= 0.0) {
                         double denom = un_hist_comp;
                         if (un_ro != 0.0)
                             denom = un_hist_comp - un_ro;
 
                         double k_re = kn_initial_;
                         double fm_re = 0.0;
+                        double beta = 1.0;
 
                         double un_rec = (un_hist_comp - un_ro) / ucel_;
                         double un_rec_nz = std::max(0.0, un_rec);
-
-                        // Smooth transition for beta instead of sharp threshold
-                        double ratio = un_hist_comp / ucel_;
-                        double blend = 0.5 * (1.0 + std::tanh(10.0 * (ratio - 1.0))); // smooth 0→1 around ucel_
-
-                        double beta1 = 1.0 / (1.0 + 0.20 * std::sqrt(un_rec_nz));
-                        double beta2 = 1.0 / (1.0 + 0.35 * std::pow(un_rec_nz, 0.2));
-                        double beta = beta1 * (1.0 - blend) + beta2 * blend;
+                        if (un_hist_comp < ucel_) {
+                            beta = 1.0 / (1.0 + 0.20 * std::sqrt(un_rec_nz));
+                        }
+                        else {
+                            beta = 1.0 / (1.0 + 0.35 * std::pow(un_rec_nz, 0.2));
+                        }
 
                         if (std::abs(denom) < 1e-12) {
                             k_re = kn_comp_;
@@ -716,13 +716,11 @@ namespace jmodels
                             else {
                                 reloadFlag = 0;
                                 jumptoDC = true;
-                                fn_new = fc_env * s->area_; // FIX: Lock to envelope
-                                fc_current = fc_env;        // FIX: Lock to envelope
                             }
                         }
                         else {
                             // undamaged envelope
-                            double x_env = (un_new - uel_limit) / ucel_;
+                            double x_env = (un_current - uel_limit) / ucel_;
                             double ftemp_env = fel_limit
                                 + (fpeak - fel_limit)
                                 * std::sqrt(std::max(0.0, 2.0 * x_env - x_env * x_env));
@@ -733,10 +731,7 @@ namespace jmodels
                                 fc_current = fm_re;
                             }
                             else {
-                                // NEW CODE
-                                // Lock directly onto the compressive envelope
-                                const double fn_env = fc_env * s->area_;
-                                fn_new = fn_env;
+                                fn_new = fc_env * s->area_;
                                 fc_current = fc_env;
                                 reloadFlag = 0;
                             }
@@ -746,11 +741,10 @@ namespace jmodels
                     }
                     else {
                         // Purely elastic unloading
-                        fm_ro = 0.0;
-                        reloadFlag = 0;
                         double dfn = kn_comp_ * s->area_ * dn_;
                         fn_new += dfn;
                         fc_current = fn_new / s->area_;
+                        reloadFlag = 0;
                     } //unloading  
                 }
             }
@@ -872,6 +866,7 @@ namespace jmodels
         }
         // Compressive cap "failure" flag: when dc is near fully damaged in compression
         const bool compflag = (dc >= 0.99);
+        double dilation_c_step = 0.0;
         // shear force
         if (!tenflag && !compflag)
         {
@@ -946,16 +941,7 @@ namespace jmodels
                     // keep phi fixed (no frictional softening when dilatancy governs the weakening)
                     phi_eff_deg = phi_peak_deg;
                     psi0_eff_deg = std::atan(tan_psi_eff) / dDegRad;
-                    double dusm = s->shear_disp_inc_.mag();
 
-                    // Smoothly degrade dilatancy with compressive damage instead of abrupt shutoff
-                    double dil_factor = (ddil > 0.0) ? 1.0 : (1.0 - dc);
-                    if (dil_factor > 0.0) {
-                        double effective_tan_psi = tan_psi_eff * dil_factor;
-                        un_dilatant += effective_tan_psi * dusm;
-                        const double dfn_dil = kn_ * s->area_ * effective_tan_psi * dusm;
-                        s->normal_force_ += dfn_dil; // apply ONCE
-                    }
                 }
                 else {
                     // --- NO dilatancy: apply ds-based frictional softening (Option B) ---
@@ -987,9 +973,20 @@ namespace jmodels
                 double rat = 0.0;
                 if (fsm > 1e-30) rat = std::clamp(fsmax / fsm, 0.0, 1.0);
 
+                // Plastic part of shear increment (approx.)
+                const double slip_frac = std::clamp(1.0 - rat, 0.0, 1.0);
+                const double dusm_pl = slip_frac * s->shear_disp_inc_.mag();
+
                 // Apply shear projection
                 shearCorrection(s, &IPlas, fsm, fsmax, usel);
 
+                // Apply dilatancy normal pumping ONLY from plastic slip, and only if dilation active
+                if (dilation_ && dc == 0.0 && dilation_c_step > 0.0 && dusm_pl > 0.0)
+                {
+                    un_dilatant += dilation_c_step * dusm_pl;
+                    const double dfn_dil = kn_ * s->area_ * dilation_c_step * dusm_pl;
+                    s->normal_force_ += dfn_dil;
+                }
 
                 // Now cap-check using the updated normal force
                 if (s->normal_disp_ < 0.0) {
