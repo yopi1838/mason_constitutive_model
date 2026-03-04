@@ -820,7 +820,7 @@ namespace jmodels
             bool sign = std::signbit(dn_);
             if (sign) {
                 if (iTension_d_) {
-                    tP_ = s->normal_disp_ / (tension_ / kn_);
+                    tP_ = s->normal_disp_ / (tension_ / kn_initial_);
                     dt = s->getYFromX(iTension_d_, tP_); //if table_dt is provided.
                 }
                 else if (std::isfinite(G_I) && G_I > 0.0) {
@@ -1104,7 +1104,8 @@ namespace jmodels
 
         // Even with residual tension, do not keep a cohesive shear spring when in tension failure:
         // (Optional but strongly stabilizing in large-strain)
-        s->shear_force_ = DVect3(0.0, 0.0, 0.0);
+        s->shear_force_inc_ = DVect3(0, 0, 0);
+        s->normal_force_inc_ = 0;
         tenflag = true;
         return tenflag;
     }
@@ -1116,6 +1117,7 @@ namespace jmodels
         if (fsm) rat = fsmax / fsm;
         s->shear_force_ *= rat;
         s->state_ |= slip_now;
+        s->shear_force_inc_ = DVect3(0, 0, 0);
         double k = usel;
         k = 0.0;
 
