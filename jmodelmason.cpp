@@ -118,7 +118,9 @@ namespace jmodels
         dilation_current(0),
         un_dilatant(0),
         dil_hist(0),
-        ddil(0)
+        ddil(0),
+        kn_for_maxwell_(0),
+		nlimit(0)
     {
     }
 
@@ -160,7 +162,7 @@ namespace jmodels
             "table-dt    ,table-ds ,"
             "tensile-disp-plastic    ,shear-disp-plastic ,"
             "G_c, Cn, Cnn, Css, fc_current,  fric_current,   peak_ratio, ult_ratio,uel,un_hist_comp,peak_normal,ds_hist,"
-            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,ksechist");
+            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,k_for_maxwell,nlimit");
     }
 
     string JModelMason::getStates() const
@@ -219,6 +221,8 @@ namespace jmodels
         case 45: return dil_hist;
         case 46: return ddil;
         case 47: return reloadFlag;
+        case 48: return kn_for_maxwell_;
+		case 49: return nlimit;
         }
         return 0.0;
     }
@@ -275,6 +279,8 @@ namespace jmodels
         case 45: dil_hist = prop.to<double>(); break;
         case 46: ddil = prop.to<double>(); break;
         case 47: reloadFlag = prop.to<double>(); break;
+        case 48: kn_for_maxwell_ = prop.to<double>(); break;
+		case 49: nlimit = prop.to<double>(); break;
         }
     }
 
@@ -336,6 +342,11 @@ namespace jmodels
         dil_hist = mm->dil_hist;
         ddil = mm->ddil;
         reloadFlag = mm->reloadFlag;
+        kn_for_maxwell_ = mm->kn_for_maxwell_;
+		nlimit = mm->nlimit;
+        Cnn = mm->Cnn;
+        Css = mm->Css;
+        Cn = mm->Cn;
     }
 
     void JModelMason::initialize(uint32 dim, State* s)
@@ -347,7 +358,11 @@ namespace jmodels
         tan_res_friction_ = tan(res_friction_ * dDegRad);
         tan_dilation_ = tan(dilation_ * dDegRad);
         dilation_current = dilation_;
+        if (!s->state_) kn_for_maxwell_ = kn_initial_;
 
+        // For zero-tension joints, kn_ should always equal kn_initial_
+        // (no secant degradation — behaves like Mohr-Coulomb in tension)
+        if (tension_ <= 0.0) kn_ = kn_initial_;
 
         // Initialize compressive cap
         R_yield = 0.0;
@@ -472,7 +487,7 @@ namespace jmodels
         //double kna = kn_ * s->area_;
         double ksa = ks_ * s->area_;
         double kn_comp_ = kn_initial_;
-
+        if (!nlimit) nlimit = 1e-6;
         if (!s->state_) {
             s->working_[Dqs] = 0.0;
             s->working_[Dqt] = 0.0;
@@ -494,7 +509,7 @@ namespace jmodels
         double un_new = un_current + dn_;
 
         double sn_ = fn_old / s->area_;
-        double dsn_ = (fn_new - fn_old) / s->area_;
+        double dsn_ = kn_comp_ * dn_;  // trial elastic stress increment for branch selection
 
         constexpr double kEps = std::numeric_limits<double>::epsilon();
 
@@ -504,7 +519,10 @@ namespace jmodels
         //double ftemp = 0.0;        
 
         // --- PRE-UPDATE STIFFNESS FOR TENSION (before force calculation) ---
-        if (un_current < 0.0 && s->state_) {
+        // Only degrade kn_ if there is actual tensile capacity to soften from.
+        // With tension_ = 0 (pure friction joint), kn_ stays at kn_initial_
+        // and the joint behaves like Mohr-Coulomb: zero force in tension, full kn on closure.
+        if (tension_ > 0.0 && un_current < 0.0 && s->state_) {
             // Update tensile history
             if (dn_ < 0.0 && un_current <= un_hist_ten) {
                 un_hist_ten = un_current;
@@ -515,7 +533,7 @@ namespace jmodels
             double uel_t = tension_ / kn_initial_;
             if (un_new < (-uel_t) || un_hist_ten < (-uel_t)) {
                 const double eps_u = 1e-9;
-                const double kn_min = std::max(1e-12, 1e-6 * kn_initial_);
+                const double kn_min = std::max(1e-12, nlimit * kn_initial_);
                 const double kn_max = std::max(kn_min, 1.0 * kn_initial_);
 
                 // Compute current combined damage (already available at this point from previous cycle)
@@ -525,7 +543,8 @@ namespace jmodels
 
                 if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
                     kn_ = kn_min;
-                } else {
+                }
+                else {
                     kn_ = std::clamp(kn_cand, kn_min, kn_max);
                 }
             }
@@ -536,17 +555,43 @@ namespace jmodels
         if (un_current < 0.0) {
             // --- TENSION BRANCH ---
 
-            // update tensile history as before
-            if (dn_ < 0.0 && un_current <= un_hist_ten) {
-                un_hist_ten = un_current;  // or un_new; same as your original intent
-                s->working_[D_un_hist] = un_hist_ten;
+            if (tension_ <= 0.0) {
+                // Pure friction joint (like Mohr-Coulomb): zero tensile force while open.
+                // On closure, apply kn_initial_ only for the compression portion.
+                if (dn_ > 0.0 && un_new >= 0.0) {
+                    // Closing past zero: compression portion only
+                    double dn_comp = un_new;  // = dn_ - (-un_current), only the part past zero
+                    fn_new = kn_initial_ * s->area_ * dn_comp;
+                }
+                else {
+                    // Still open or opening further: zero force
+                    fn_new = 0.0;
+                }
             }
+            else {
+                // Softening tension joint: use degraded kn_
 
-            // compute the tensile increment using kn_
-            const double kna_t = kn_ * s->area_;  // kn_ may have been degraded by damage
-            double dfn_t = kna_t * dn_;     // Fn in tension
+                // update tensile history as before
+                if (dn_ < 0.0 && un_current <= un_hist_ten) {
+                    un_hist_ten = un_current;
+                    s->working_[D_un_hist] = un_hist_ten;
+                }
 
-            fn_new += dfn_t;                   // <-- THIS is what must exist            
+                // Check if closing back into compression this step
+                if (dn_ > 0.0 && un_new >= 0.0) {
+                    // Split step: tension portion uses kn_, compression portion uses kn_initial_
+                    double dn_ten = -un_current;           // displacement to close the gap to zero
+                    double dn_comp = dn_ - dn_ten;         // remaining displacement into compression
+                    fn_new += kn_ * s->area_ * dn_ten;     // close tension gap
+                    fn_new += kn_initial_ * s->area_ * dn_comp; // compress with undamaged stiffness
+                }
+                else {
+                    // Purely in tension
+                    const double kna_t = kn_ * s->area_;
+                    double dfn_t = kna_t * dn_;
+                    fn_new += dfn_t;
+                }
+            }
         }
         else {//COMPRESSION BRANCH --------------------------------------------------
             // Update unloading history
@@ -813,12 +858,12 @@ namespace jmodels
         }
 
         fc_current = comp / s->area_;
-        uel_ = tension_ / kn_initial_;
+        uel_ = (kn_initial_ > 0.0) ? tension_ / kn_initial_ : 0.0;
         //Define the softening tensile strength
-        if (s->state_)
+        if (s->state_ && (tension_ > 0.0 || cohesion_ > 0.0))
         {
             bool sign = std::signbit(dn_);
-            if (sign) {
+            if (sign && tension_ > 0.0) {
                 if (iTension_d_) {
                     tP_ = s->normal_disp_ / (tension_ / kn_initial_);
                     dt = s->getYFromX(iTension_d_, tP_); //if table_dt is provided.
@@ -846,12 +891,18 @@ namespace jmodels
 
         ten = -ten_strength * s->area_;
         if (d_ts >= 1.0 - dts_eps && un_current < 0.0) { // in tension opening
-            s->normal_force_ = 0.0;
-            s->shear_force_ = DVect3(0.0, 0.0, 0.0);
-            s->normal_force_inc_ = s->normal_force_ - fn_old;
-            s->shear_force_inc_ = s->shear_force_ - fs_old;
-            s->state_ |= tension_now;
-            return;
+            // Only zero out forces if the joint is still OPENING (dn_ <= 0).
+            // If closing (dn_ > 0), the contact is returning toward compression
+            // and must be allowed to carry compressive force — do NOT early-return.
+            if (dn_ <= 0.0) {
+                s->normal_force_ = 0.0;
+                s->shear_force_ = DVect3(0.0, 0.0, 0.0);
+                s->normal_force_inc_ = s->normal_force_ - fn_old;
+                s->shear_force_inc_ = s->shear_force_ - fs_old;
+                s->state_ |= tension_now;
+                return;
+            }
+            // else: closing — fall through to normal tensile/shear/cap logic
         }
 
 
@@ -867,6 +918,20 @@ namespace jmodels
         // Compressive cap "failure" flag: when dc is near fully damaged in compression
         const bool compflag = (dc >= 0.99);
         double dilation_c_step = 0.0;
+        // Pre-compute dilatancy contribution for this step
+        if (dilation_ && s->state_ && !compflag) {
+            double dil_0 = dilation_;
+            double tmax_dil = cohesion_ + tan((friction_ + dil_0) * dDegRad) * s->normal_force_ / s->area_;
+            double usel_dil = (ks_ > 0.0) ? tmax_dil / ks_ : 0.0;
+            const double usm_raw = s->shear_disp_.mag() - usel_dil;
+            const double usm = std::max(0.0, usm_raw);
+            const double zdd = std::max(s_zero_dilation_, 1e-12);
+            const double delta_eff = std::max(0.0, delta);
+            double tan_psi = tan_dilation_ * (1.0 - (usm / zdd)) * std::exp(-delta_eff * usm);
+            if (!std::isfinite(tan_psi) || tan_psi < 0.0) tan_psi = 0.0;
+            tan_psi = std::min(tan_psi, tan_dilation_);
+            dilation_c_step = tan_psi;
+        }
         // shear force
         if (!tenflag && !compflag)
         {
@@ -885,14 +950,17 @@ namespace jmodels
             if (s->state_) {
                 //Calculate max shear stress                            
 
-                ////Exponential Softening                              
-                if (iShear_d_) {
-                    sP_ = s->shear_disp_.mag() / usel;
-                    ds = s->getYFromX(iShear_d_, sP_);
-                }
-                else if (std::isfinite(G_II) && G_II > 0.0) {
-                    sP_ = s->shear_disp_.mag() - usel;
-                    ds = 1 - exp(-cohesion_ / G_II * (s->shear_disp_.mag() - usel));
+                ////Exponential Softening
+                // Only compute shear damage if there is cohesion to soften from
+                if (cohesion_ > 0.0) {
+                    if (iShear_d_) {
+                        sP_ = s->shear_disp_.mag() / usel;
+                        ds = s->getYFromX(iShear_d_, sP_);
+                    }
+                    else if (std::isfinite(G_II) && G_II > 0.0) {
+                        sP_ = s->shear_disp_.mag() - usel;
+                        ds = 1 - exp(-cohesion_ / G_II * (s->shear_disp_.mag() - usel));
+                    }
                 }
                 if (ds >= ds_hist) ds_hist = ds;
                 else ds = ds_hist;
@@ -978,7 +1046,7 @@ namespace jmodels
                 const double dusm_pl = slip_frac * s->shear_disp_inc_.mag();
 
                 // Apply shear projection
-                shearCorrection(s, &IPlas, fsm, fsmax, usel);
+                shearCorrection(s, &IPlas, fsm, fsmax);
 
                 // Apply dilatancy normal pumping ONLY from plastic slip, and only if dilation active
                 if (dilation_ && dc == 0.0 && dilation_c_step > 0.0 && dusm_pl > 0.0)
@@ -1007,7 +1075,7 @@ namespace jmodels
                 if (f3 >= 0.0) {
                     compCorrection(s, &IPlas, comp);
                     if (f2 >= 0.0) {
-                        shearCorrection(s, &IPlas, fsm, fsmax, usel);
+                        shearCorrection(s, &IPlas, fsm, fsmax);
                     }
                 }
             }//s->normal_disp < 0.0
@@ -1073,6 +1141,10 @@ namespace jmodels
             if (s->dnop_ > s->normal_disp_inc_) s->dnop_ = s->normal_disp_inc_;
         }
 
+        kn_for_maxwell_ = (un_current >= 0.0)
+            ? kn_initial_ * (1.0 - dc)   // compression: degraded by dc
+            : kn_;                         // tension: secant stiffness
+
         // At end of run()
         if (std::isnan(s->normal_force_)) {
             throw std::runtime_error("NaN detected in JModelYopi::run normal side");
@@ -1111,16 +1183,14 @@ namespace jmodels
     }
 
 
-    void JModelMason::shearCorrection(State* s, uint32* IPlasticity, double& fsm, double& fsmax, double& usel) {
+    void JModelMason::shearCorrection(State* s, uint32* IPlasticity, double& fsm, double& fsmax) {
         if (IPlasticity) *IPlasticity = 2;
-        double rat = 0.0;
-        if (fsm) rat = fsmax / fsm;
-        s->shear_force_ *= rat;
         s->state_ |= slip_now;
-        s->shear_force_inc_ = DVect3(0, 0, 0);
-        double k = usel;
-        k = 0.0;
-
+        DVect3 fs_before = s->shear_force_;
+        double rat = 0.0;
+        if (fsm > 1e-30) rat = fsmax / fsm;
+        s->shear_force_ *= rat;
+        s->shear_force_inc_ = s->shear_force_ - fs_before;
     }
 
     void JModelMason::compCorrection(State* s, uint32* IPlasticity, double& comp) {

@@ -19,7 +19,7 @@
 
 namespace jmodels
 {
-    
+
     class JModelMason : public JointModel {
     public:
         JModelMason();
@@ -33,8 +33,14 @@ namespace jmodels
         virtual string         getStates() const;
         virtual base::Property getProperty(uint32 index) const;
         virtual void           setProperty(uint32 index, const base::Property& p, uint32 restoreVersion = 0);
-        virtual JModelMason* clone() const { return new JModelMason(); }
+        virtual JModelMason* clone() const {
+            JModelMason* m = new JModelMason();
+            m->copy(this);
+            return m;
+        }
         virtual double getMaxNormalStiffness() const override {
+            if (kn_for_maxwell_ > 0.0) return kn_for_maxwell_;
+            if (kn_initial_ > 0.0) return kn_initial_;
             return kn_;
         }
         virtual double         getMaxShearStiffness() const { return ks_; }
@@ -43,13 +49,13 @@ namespace jmodels
         virtual void           initialize(uint32 dim, State* s); // calls setValid(dim)    
         virtual double         solveQuadratic(double, double, double);
         virtual void           compCorrection(State* s, uint32* IPlasticity, double& comp);
-        virtual void           shearCorrection(State* s, uint32* IPlasticity, double& fsm, double& fsmax, double& usel);
+        virtual void           shearCorrection(State* s, uint32* IPlasticity, double& fsm, double& fsmax);
         virtual bool           tensionCorrection(State* s, uint32* IPlasticity, double& ten, bool& tenflag);
-        
+
         // Enumerator for the energies.
         enum EnergyKeys {
             kwETension = 1
-			, kwECompression
+            , kwECompression
             , kwEShear
         };
         //Energy calculations
@@ -71,14 +77,14 @@ namespace jmodels
         // Returns whether or not the energy tracking has been enabled for this contact.
         bool     getEnergyActivated() const override { return (energies_ != 0); }
         //Check if the model has energies
-		bool hasEnergies() const { return energies_ ? true: false; }
-		double etension() const { return hasEnergies() ? energies_->etension_ : 0.0; }
+        bool hasEnergies() const { return energies_ ? true : false; }
+        double etension() const { return hasEnergies() ? energies_->etension_ : 0.0; }
         void etension(const double& d) { if (!hasEnergies()) return; energies_->etension_ = d; }
         double ecompression() const { return hasEnergies() ? energies_->ecompression_ : 0.0; }
         void ecompression(const double& d) { if (!hasEnergies()) return; energies_->ecompression_ = d; }
         double eshear() const { return hasEnergies() ? energies_->eshear_ : 0.0; }
         void eshear(const double& d) { if (!hasEnergies()) return; energies_->eshear_ = d; }
-        
+
         // Optional 
         virtual double         getStrengthStressRatio(const double&, const DVect3&) const { return 10.0; }
         virtual void           scaleProperties(const double&, const std::vector<uint32>&) {
@@ -143,13 +149,15 @@ namespace jmodels
         double un_dilatant;
         double dil_hist;
         double ddil;
+        double kn_for_maxwell_; //Maxwell stiffness feed to dynamic loading sequence
+		double nlimit; //Limit for n to avoid numerical issues
 
         // Structure to store the energies. 
         struct Energies {
-            Energies() : etension_(0.0),ecompression_(0.0), eshear_(0.0) {}
-			double etension_;  // tensile elastic energy stored in contact
-			double ecompression_;  // compression elastic energy stored in contact
-			double eshear_;    // shear elastic energy stored in contact
+            Energies() : etension_(0.0), ecompression_(0.0), eshear_(0.0) {}
+            double etension_;  // tensile elastic energy stored in contact
+            double ecompression_;  // compression elastic energy stored in contact
+            double eshear_;    // shear elastic energy stored in contact
         };
         Energies* energies_ = nullptr; // The energies
     };
