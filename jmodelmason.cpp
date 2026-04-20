@@ -15,7 +15,7 @@ extern "C" __declspec(dllexport) const char* getName()
 #ifdef JMODELDEBUG
     return "jmodelmasond";
 #else
-    return "jmodelmason";
+    return "jmodelmasonv1";
 #endif
 }
 
@@ -136,7 +136,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "masond";
 #else
-        return "mason";
+        return "masonv1";
 #endif
     }
 
@@ -145,7 +145,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "Mason Debug";
 #else
-        return "Mason";
+        return "Masonv1";
 #endif
     }
 
@@ -509,7 +509,7 @@ namespace jmodels
         double un_new = un_current + dn_;
 
         double sn_ = fn_old / s->area_;
-        double dsn_ = kn_comp_ * dn_;  // trial elastic stress increment for branch selection
+        double dsn_ = (fn_new - fn_old) / s->area_;  // trial elastic stress increment for branch selection
 
         constexpr double kEps = std::numeric_limits<double>::epsilon();
 
@@ -554,7 +554,6 @@ namespace jmodels
         // Opening (dn_ < 0) = loading; Closing (dn_ > 0) = unloading (secant)        
         if (un_current < 0.0) {
             // --- TENSION BRANCH ---
-
             if (tension_ <= 0.0) {
                 // Pure friction joint (like Mohr-Coulomb): zero tensile force while open.
                 // On closure, apply kn_initial_ only for the compression portion.
@@ -1190,7 +1189,7 @@ namespace jmodels
         double rat = 0.0;
         if (fsm > 1e-30) rat = fsmax / fsm;
         s->shear_force_ *= rat;
-        s->shear_force_inc_ = s->shear_force_ - fs_before;
+		s->shear_force_inc_ = DVect3(0, 0, 0); // reset increment since we directly set the shear force
     }
 
     void JModelMason::compCorrection(State* s, uint32* IPlasticity, double& comp) {

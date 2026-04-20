@@ -39,8 +39,6 @@ namespace jmodels
             return m;
         }
         virtual double getMaxNormalStiffness() const override {
-            if (kn_for_maxwell_ > 0.0) return kn_for_maxwell_;
-            if (kn_initial_ > 0.0) return kn_initial_;
             return kn_;
         }
         virtual double         getMaxShearStiffness() const { return ks_; }
