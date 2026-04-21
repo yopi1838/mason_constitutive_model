@@ -529,25 +529,7 @@ namespace jmodels
                 s->working_[D_un_hist] = un_hist_ten;
             }
 
-            // Update tensile stiffness BEFORE computing forces
-            double uel_t = tension_ / kn_initial_;
-            if (un_new < (-uel_t) || un_hist_ten < (-uel_t)) {
-                const double eps_u = 1e-9;
-                const double kn_min = std::max(1e-12, nlimit * kn_initial_);
-                const double kn_max = std::max(kn_min, 1.0 * kn_initial_);
-
-                // Compute current combined damage (already available at this point from previous cycle)
-                const double d_ts_current = std::min(std::max(d_ts, 0.0), 1.0);
-                const double denom = std::max(std::abs(un_hist_ten), eps_u);
-                double kn_cand = tension_ * (1.0 - d_ts_current) / denom;
-
-                if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
-                    kn_ = kn_min;
-                }
-                else {
-                    kn_ = std::clamp(kn_cand, kn_min, kn_max);
-                }
-            }
+            
         }
 
         // --- TENSION BRANCH --------------------------------------------------
@@ -861,7 +843,8 @@ namespace jmodels
                     tP_ = s->normal_disp_ - (tension_ / kn_initial_);
                     dt = 1.0 - exp(-tension_ / G_I * (s->normal_disp_ - (tension_ / kn_initial_))); //Exponential Softening
                 }
-            }
+            }// Update tensile stiffness BEFORE computing forces
+            
             if (dt_hist < dt) dt_hist = dt;
             else dt = dt_hist;
             // Clamp tensile damage to avoid infinite approach to 1
@@ -871,6 +854,24 @@ namespace jmodels
             if (!std::isfinite(d_ts)) d_ts = 0.0;
             // Note: Stiffness kn_ is now updated BEFORE force calculation (see above)
             // to avoid one-cycle lag and ensure consistency during cyclic loading
+            double uel_t = tension_ / kn_initial_;
+            if (un_new < (-uel_t) || un_hist_ten < (-uel_t)) {
+                const double eps_u = 1e-9;
+                const double kn_min = std::max(1e-12, nlimit * kn_initial_);
+                const double kn_max = std::max(kn_min, 1.0 * kn_initial_);
+
+                // Compute current combined damage (already available at this point from previous cycle)
+                const double d_ts_current = std::min(std::max(d_ts, 0.0), 1.0);
+                const double denom = std::max(std::abs(un_hist_ten), eps_u);
+                double kn_cand = tension_ * (1.0 - d_ts_current) / denom;
+
+                if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
+                    kn_ = kn_min;
+                }
+                else {
+                    kn_ = std::clamp(kn_cand, kn_min, kn_max);
+                }
+            }
         }
         const double dts_eps = 1e-6; // practical threshold for "fully damaged"
         const double dts_eff = std::min(std::max(d_ts, 0.0), 1.0);
