@@ -575,21 +575,11 @@ namespace jmodels
                     un_hist_ten = un_current;
                     s->working_[D_un_hist] = un_hist_ten;
                 }
-
                 // Check if closing back into compression this step
-                if (dn_ > 0.0 && un_new >= 0.0) {
-                    // Split step: tension portion uses kn_, compression portion uses kn_initial_
-                    double dn_ten = -un_current;           // displacement to close the gap to zero
-                    double dn_comp = dn_ - dn_ten;         // remaining displacement into compression
-                    fn_new += kn_ * s->area_ * dn_ten;     // close tension gap
-                    fn_new += kn_initial_ * s->area_ * dn_comp; // compress with undamaged stiffness
-                }
-                else {
-                    // Purely in tension
-                    const double kna_t = kn_ * s->area_;
-                    double dfn_t = kna_t * dn_;
-                    fn_new += dfn_t;
-                }
+                // Purely in tension
+                const double kna_t = kn_ * s->area_;
+                double dfn_t = kna_t * dn_;
+                fn_new += dfn_t;
             }
         }
         else {//COMPRESSION BRANCH --------------------------------------------------
@@ -889,21 +879,6 @@ namespace jmodels
         if (dts_eff >= 1.0 - dts_eps) ten_strength = res_tension_;   // exactly residual at full damage
 
         ten = -ten_strength * s->area_;
-        if (d_ts >= 1.0 - dts_eps && un_current < 0.0) { // in tension opening
-            // Only zero out forces if the joint is still OPENING (dn_ <= 0).
-            // If closing (dn_ > 0), the contact is returning toward compression
-            // and must be allowed to carry compressive force — do NOT early-return.
-            if (dn_ <= 0.0) {
-                s->normal_force_ = 0.0;
-                s->shear_force_ = DVect3(0.0, 0.0, 0.0);
-                s->normal_force_inc_ = s->normal_force_ - fn_old;
-                s->shear_force_inc_ = s->shear_force_ - fs_old;
-                s->state_ |= tension_now;
-                return;
-            }
-            // else: closing — fall through to normal tensile/shear/cap logic
-        }
-
 
         // check tensile failure
         bool tenflag = false;
