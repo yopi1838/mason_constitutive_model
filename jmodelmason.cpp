@@ -854,24 +854,10 @@ namespace jmodels
             if (!std::isfinite(d_ts)) d_ts = 0.0;
             // Note: Stiffness kn_ is now updated BEFORE force calculation (see above)
             // to avoid one-cycle lag and ensure consistency during cyclic loading
-            double uel_t = tension_ / kn_initial_;
-            if (un_new < (-uel_t) || un_hist_ten < (-uel_t)) {
-                const double eps_u = 1e-9;
-                const double kn_min = std::max(1e-12, nlimit * kn_initial_);
-                const double kn_max = std::max(kn_min, 1.0 * kn_initial_);
+            // NOTE: kn_ (tensile unloading secant) is no longer updated here.
+            // It is computed once per step at the end of run() as a single
+            // source of truth, driven by mode-I damage dt only (see end of run()).
 
-                // Compute current combined damage (already available at this point from previous cycle)
-                const double d_ts_current = std::min(std::max(d_ts, 0.0), 1.0);
-                const double denom = std::max(std::abs(un_hist_ten), eps_u);
-                double kn_cand = tension_ * (1.0 - d_ts_current) / denom;
-
-                if (!std::isfinite(kn_cand) || kn_cand <= 0.0) {
-                    kn_ = kn_min;
-                }
-                else {
-                    kn_ = std::clamp(kn_cand, kn_min, kn_max);
-                }
-            }
         }
         const double dts_eps = 1e-6; // practical threshold for "fully damaged"
         const double dts_eff = std::min(std::max(d_ts, 0.0), 1.0);
@@ -1116,10 +1102,41 @@ namespace jmodels
             if (s->dnop_ > s->normal_disp_inc_) s->dnop_ = s->normal_disp_inc_;
         }
 
-        kn_for_maxwell_ = (un_current >= 0.0)
-            ? kn_initial_ * (1.0 - dc)   // compression: degraded by dc
-            : kn_;                         // tension: secant stiffness
+        // ---------------------------------------------------------------
+        // Centralized normal-stiffness update (single source of truth).
+        // kn_ is the tensile unloading secant used by the NEXT step's
+        // tension branch, the dilatancy coupling, and the Maxwell feed.
+        // Driven by mode-I (tensile) damage dt ONLY, so shear damage no
+        // longer bleeds into the normal-stiffness pathway. Evaluated every
+        // step (the else covers the elastic / no-history case) -- the same
+        // discipline TSCLinear uses for its single kn_ assignment.
+        // ---------------------------------------------------------------
+        {
+            const double uel_t = (kn_initial_ > 0.0) ? (tension_ / kn_initial_) : 0.0;
+            const bool tensile_history =
+                (tension_ > 0.0) && ((un_new < -uel_t) || (un_hist_ten < -uel_t));
+            if (tensile_history) {
+                const double kn_min = std::max(1e-12, nlimit * kn_initial_);
+                const double kn_max = kn_initial_;
+                const double dt_eff = std::min(std::max(dt, 0.0), 1.0);   // dt, NOT d_ts
+                const double denom = std::max(std::abs(un_hist_ten), 1e-9);
+                double kn_cand = tension_ * (1.0 - dt_eff) / denom;
+                kn_ = (std::isfinite(kn_cand) && kn_cand > 0.0)
+                    ? std::clamp(kn_cand, kn_min, kn_max)
+                    : kn_min;
+            }
+            else {
+                kn_ = kn_initial_;   // no tensile failure history -> full stiffness
+            }
+        }
 
+        // Operating normal stiffness reported via getMaxNormalStiffness()
+        // (timestep + Maxwell damping): the per-state value, not the raw secant.
+        // Compression responds at ~kn_initial_ so it is damped properly; open
+        // tension carries the dt-driven secant.
+        kn_for_maxwell_ = (un_current >= 0.0)
+            ? kn_initial_ * (1.0 - dc)   // compression: ~elastic (dc~0 without crushing)
+            : kn_;                         // tension: secant stiffness (dt-driven)
         // At end of run()
         if (std::isnan(s->normal_force_)) {
             throw std::runtime_error("NaN detected in JModelYopi::run normal side");

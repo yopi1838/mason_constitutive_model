@@ -39,7 +39,16 @@ namespace jmodels
             return m;
         }
         virtual double getMaxNormalStiffness() const override {
-            return kn_;
+            // Feeds BOTH the explicit timestep AND the stiffness-proportional
+            // (Maxwell) damping, so it must reflect the contact's ACTUAL
+            // operating normal stiffness per state, not the raw tensile secant:
+            //   compression  -> ~kn_initial_*(1-dc)  (properly damped)
+            //   open tension -> degraded secant      (little force/damping)
+            // Returning the raw secant collapsed damping model-wide under cyclic
+            // shear (the smeared d_ts); a constant would over-damp degraded contacts.
+            // NaN-safe: NaN > 0.0 is false, so it falls back to kn_initial_.
+            const double k = kn_for_maxwell_;
+            return (k > 0.0) ? k : kn_initial_;
         }
         virtual double         getMaxShearStiffness() const { return ks_; }
         virtual void           copy(const JointModel* mod);
