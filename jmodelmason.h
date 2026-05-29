@@ -20,11 +20,11 @@
 namespace jmodels
 {
 
-    class JModelMason : public JointModel {
+    class JModelMasonHealing : public JointModel {
     public:
-        JModelMason();
+        JModelMasonHealing();
         // Destructor, called when contact is deleted: free allocated memory, etc.
-        virtual ~JModelMason();
+        virtual ~JModelMasonHealing();
         virtual string         getName() const;
         virtual string         getPluginName() const { return getName(); }
         virtual string         getFullName() const;
@@ -33,8 +33,8 @@ namespace jmodels
         virtual string         getStates() const;
         virtual base::Property getProperty(uint32 index) const;
         virtual void           setProperty(uint32 index, const base::Property& p, uint32 restoreVersion = 0);
-        virtual JModelMason* clone() const {
-            JModelMason* m = new JModelMason();
+        virtual JModelMasonHealing* clone() const {
+            JModelMasonHealing* m = new JModelMasonHealing();
             m->copy(this);
             return m;
         }
@@ -58,6 +58,8 @@ namespace jmodels
         virtual void           compCorrection(State* s, uint32* IPlasticity, double& comp);
         virtual void           shearCorrection(State* s, uint32* IPlasticity, double& fsm, double& fsmax);
         virtual bool           tensionCorrection(State* s, uint32* IPlasticity, double& ten, bool& tenflag);
+        // Self-healing: simplified 3-parameter recovery-time damage reduction
+        virtual void           applyHealing();
 
         // Enumerator for the energies.
         enum EnergyKeys {
@@ -157,7 +159,29 @@ namespace jmodels
         double dil_hist;
         double ddil;
         double kn_for_maxwell_; //Maxwell stiffness feed to dynamic loading sequence
-		double nlimit; //Limit for n to avoid numerical issues
+        double nlimit; //Limit for n to avoid numerical issues
+
+        // ============ SELF-HEALING MEMBERS (simplified 3-parameter law) ============
+        //   eta(w,RT) = h_max * exp(-alpha*w) * (1 - exp(-RT/tau))
+        //   width sets the amplitude (ceiling), tau the single time constant.
+        //   damage is the trigger + actuator; crack width drives the amplitude.
+        bool   heal_enabled_;          // master switch (set during a rest stage)
+        double heal_h_max_;            // healing ceiling at w=0        [data-backed]
+        double heal_alpha_;            // crack-width sensitivity [mm^-1][data-backed]
+        double heal_tau_;              // healing time constant [days]  [MICCP-anchored]
+        double heal_Er_;               // stiffness recovery ratio E_h/E_0 (phase-field map)
+        double heal_time_scale_;       // physical days accrued per cycle (0 = prescribed RT)
+        double heal_damage_threshold_; // min damage to be heal-eligible
+        double heal_stress_threshold_; // |sigma_n| gate (0 = rely on master switch)
+        double heal_w_max_;            // crack-width healing limit [mm] (trigger gate)
+        double heal_RT_;               // accumulated resting time [days]
+        double heal_n_cycles_;         // completed healing episodes (monitor)
+        bool   heal_resting_;          // currently within a resting episode
+        double heal_eta_last_;         // last computed eta (monitor)
+        double heal_w_at_heal_;        // crack width frozen at episode entry
+        double heal_dt_end_;           // tensile damage frozen at episode entry
+        double heal_ds_end_;           // shear   damage frozen at episode entry
+        double heal_dc_end_;           // compr.  damage frozen at episode entry
 
         // Structure to store the energies. 
         struct Energies {

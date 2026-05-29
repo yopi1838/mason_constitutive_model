@@ -13,9 +13,9 @@ int __stdcall DllMain(void*, unsigned, void*)
 extern "C" __declspec(dllexport) const char* getName()
 {
 #ifdef JMODELDEBUG
-    return "jmodelmasond";
+    return "jmodelmasonhealingd";
 #else
-    return "jmodelmasonv5";
+    return "jmodelmasonhealing";
 #endif
 }
 
@@ -31,7 +31,7 @@ extern "C" __declspec(dllexport) unsigned getMinorVersion()
 
 extern "C" __declspec(dllexport) void* createInstance()
 {
-    jmodels::JModelMason* m = new jmodels::JModelMason();
+    jmodels::JModelMasonHealing* m = new jmodels::JModelMasonHealing();
     return (void*)m;
 }
 
@@ -44,7 +44,7 @@ namespace jmodels
     }
     // Clamp damage variables in [0,1] and snap to 1 once they are "close enough"
     // to avoid asymptotic approach without ever numerically reaching 1.
-#include <cmath> // ensure std::isfinite is available
+    #include <cmath> // ensure std::isfinite is available
     inline double clampDamage(double v) {
         if (v <= 0.0) return 0.0;
         if (v >= 1.0 - 1e-8) return 1.0;
@@ -66,7 +66,7 @@ namespace jmodels
     static const uint32 comp_now = 0x10;
     static const uint32 comp_past = 0x20;
 
-    JModelMason::JModelMason() :
+    JModelMasonHealing::JModelMasonHealing() :
         kn_(0),
         kn_initial_(0),
         ks_(0),
@@ -120,41 +120,58 @@ namespace jmodels
         dil_hist(0),
         ddil(0),
         kn_for_maxwell_(0),
-		nlimit(0)
+        nlimit(0)
+        , heal_enabled_(false)
+        , heal_h_max_(0.3491)
+        , heal_alpha_(6.0345)
+        , heal_tau_(12.16)
+        , heal_Er_(1.0)
+        , heal_time_scale_(0.0)
+        , heal_damage_threshold_(0.01)
+        , heal_stress_threshold_(0.0)
+        , heal_w_max_(0.5)
+        , heal_RT_(0.0)
+        , heal_n_cycles_(0.0)
+        , heal_resting_(false)
+        , heal_eta_last_(0.0)
+        , heal_w_at_heal_(0.0)
+        , heal_dt_end_(0.0)
+        , heal_ds_end_(0.0)
+        , heal_dc_end_(0.0)
     {
     }
 
-    JModelMason::~JModelMason()
+    JModelMasonHealing::~JModelMasonHealing()
     {
         // Clean up any allocated resources here
         if (energies_)
             delete energies_;
     }
 
-    string JModelMason::getName() const
+    string JModelMasonHealing::getName() const
     {
 #ifdef JMODELDEBUG
-        return "masond";
+        return "masonhealingd";
 #else
-        return "mason_v5";
+        return "masonhealing";
 #endif
     }
 
-    string JModelMason::getFullName() const
+    string JModelMasonHealing::getFullName() const
     {
 #ifdef JMODELDEBUG
-        return "Mason Debug";
+        return "Mason Healing Debug";
 #else
-        return "Mason_v5";
+        return "Mason Healing";
 #endif
     }
 
-    uint32 JModelMason::getMinorVersion() const
+    uint32 JModelMasonHealing::getMinorVersion() const
     {
         return UPDATE_VERSION;
     }
 
-    string JModelMason::getProperties() const
+    string JModelMasonHealing::getProperties() const
     {
         return("stiffness-normal       ,stiffness-initial    ,stiffness-shear        ,cohesion   ,compression  ,friction   ,dilation   ,"
             "tension   ,dilation-zero    ,cohesion-residual  ,friction-residual  , comp-residual ,"
@@ -162,15 +179,17 @@ namespace jmodels
             "table-dt    ,table-ds ,"
             "tensile-disp-plastic    ,shear-disp-plastic ,"
             "G_c, Cn, Cnn, Css, fc_current,  fric_current,   peak_ratio, ult_ratio,uel,un_hist_comp,peak_normal,ds_hist,"
-            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,k_for_maxwell,nlimit");
+            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,"
+            "k_for_maxwell,nlimit,heal_enabled,heal_h_max,heal_alpha,heal_tau,heal_Er,heal_time_scale,heal_damage_threshold,"
+            "heal_stress_threshold,heal_w_max,heal_RT,heal_n_cycles,heal_resting,heal_eta_last,heal_w_at_heal,heal_dt_end,heal_ds_end,heal_dc_end");
     }
 
-    string JModelMason::getStates() const
+    string JModelMasonHealing::getStates() const
     {
         return "slip-n,tension-n,slip-p,tension-p,cap-n,cap-p";
     }
 
-    base::Property JModelMason::getProperty(uint32 index) const
+    base::Property JModelMasonHealing::getProperty(uint32 index) const
     {
         switch (index)
         {
@@ -222,12 +241,29 @@ namespace jmodels
         case 46: return ddil;
         case 47: return reloadFlag;
         case 48: return kn_for_maxwell_;
-		case 49: return nlimit;
+        case 49: return nlimit;
+        case 50: return heal_enabled_;
+        case 51: return heal_h_max_;
+        case 52: return heal_alpha_;
+        case 53: return heal_tau_;
+        case 54: return heal_Er_;
+        case 55: return heal_time_scale_;
+        case 56: return heal_damage_threshold_;
+        case 57: return heal_stress_threshold_;
+        case 58: return heal_w_max_;
+        case 59: return heal_RT_;
+        case 60: return heal_n_cycles_;
+        case 61: return heal_resting_;
+        case 62: return heal_eta_last_;
+        case 63: return heal_w_at_heal_;
+        case 64: return heal_dt_end_;
+        case 65: return heal_ds_end_;
+        case 66: return heal_dc_end_;
         }
         return 0.0;
     }
 
-    void JModelMason::setProperty(uint32 index, const base::Property& prop, uint32)
+    void JModelMasonHealing::setProperty(uint32 index, const base::Property& prop, uint32)
     {
         JointModel::setProperty(index, prop);
         switch (index)
@@ -280,7 +316,24 @@ namespace jmodels
         case 46: ddil = prop.to<double>(); break;
         case 47: reloadFlag = prop.to<double>(); break;
         case 48: kn_for_maxwell_ = prop.to<double>(); break;
-		case 49: nlimit = prop.to<double>(); break;
+        case 49: nlimit = prop.to<double>(); break;
+        case 50: heal_enabled_ = prop.to<bool>(); break;
+        case 51: heal_h_max_ = prop.to<double>(); break;
+        case 52: heal_alpha_ = prop.to<double>(); break;
+        case 53: heal_tau_ = prop.to<double>(); break;
+        case 54: heal_Er_ = prop.to<double>(); break;
+        case 55: heal_time_scale_ = prop.to<double>(); break;
+        case 56: heal_damage_threshold_ = prop.to<double>(); break;
+        case 57: heal_stress_threshold_ = prop.to<double>(); break;
+        case 58: heal_w_max_ = prop.to<double>(); break;
+        case 59: heal_RT_ = prop.to<double>(); break;
+        case 60: heal_n_cycles_ = prop.to<double>(); break;
+        case 61: heal_resting_ = prop.to<bool>(); break;
+        case 62: heal_eta_last_ = prop.to<double>(); break;
+        case 63: heal_w_at_heal_ = prop.to<double>(); break;
+        case 64: heal_dt_end_ = prop.to<double>(); break;
+        case 65: heal_ds_end_ = prop.to<double>(); break;
+        case 66: heal_dc_end_ = prop.to<double>(); break;
         }
     }
 
@@ -290,10 +343,10 @@ namespace jmodels
     static const uint32 Dqc = 3;
     static const uint32 D_un_hist = 4;
 
-    void JModelMason::copy(const JointModel* m)
+    void JModelMasonHealing::copy(const JointModel* m)
     {
         JointModel::copy(m);
-        const JModelMason* mm = dynamic_cast<const JModelMason*>(m);
+        const JModelMasonHealing* mm = dynamic_cast<const JModelMasonHealing*>(m);
         if (!mm) throw std::runtime_error("Internal error: constitutive model dynamic cast failed.");
         kn_ = mm->kn_;
         kn_initial_ = mm->kn_initial_;
@@ -343,13 +396,30 @@ namespace jmodels
         ddil = mm->ddil;
         reloadFlag = mm->reloadFlag;
         kn_for_maxwell_ = mm->kn_for_maxwell_;
-		nlimit = mm->nlimit;
+        nlimit = mm->nlimit;
         Cnn = mm->Cnn;
         Css = mm->Css;
         Cn = mm->Cn;
+        heal_enabled_ = mm->heal_enabled_;
+        heal_h_max_ = mm->heal_h_max_;
+        heal_alpha_ = mm->heal_alpha_;
+        heal_tau_ = mm->heal_tau_;
+        heal_Er_ = mm->heal_Er_;
+        heal_time_scale_ = mm->heal_time_scale_;
+        heal_damage_threshold_ = mm->heal_damage_threshold_;
+        heal_stress_threshold_ = mm->heal_stress_threshold_;
+        heal_w_max_ = mm->heal_w_max_;
+        heal_RT_ = mm->heal_RT_;
+        heal_n_cycles_ = mm->heal_n_cycles_;
+        heal_resting_ = mm->heal_resting_;
+        heal_eta_last_ = mm->heal_eta_last_;
+        heal_w_at_heal_ = mm->heal_w_at_heal_;
+        heal_dt_end_ = mm->heal_dt_end_;
+        heal_ds_end_ = mm->heal_ds_end_;
+        heal_dc_end_ = mm->heal_dc_end_;
     }
 
-    void JModelMason::initialize(uint32 dim, State* s)
+    void JModelMasonHealing::initialize(uint32 dim, State* s)
     {
         JointModel::initialize(dim, s);
 
@@ -399,10 +469,19 @@ namespace jmodels
         if (!Cn)           Cn = 0.0;
         if (!Cnn)          Cnn = 1.0;
         if (!Css)          Css = 1.0;
+
+        // --- self-healing parameter sanity ---
+        if (heal_h_max_ < 0.0) heal_h_max_ = 0.0;
+        if (heal_h_max_ > 1.0) heal_h_max_ = 1.0;
+        if (heal_alpha_ < 0.0) heal_alpha_ = 0.0;
+        if (heal_tau_ <= 0.0) heal_tau_ = 12.16;
+        if (heal_Er_ < 0.0) heal_Er_ = 0.0;
+        if (heal_w_max_ <= 0.0) heal_w_max_ = 0.5;
+        if (heal_damage_threshold_ < 0.0) heal_damage_threshold_ = 0.0;
     }
 
     // numerically-stable quadratic (q-formula) + finite clamp
-    double JModelMason::solveQuadratic(double a, double b, double c) {
+    double JModelMasonHealing::solveQuadratic(double a, double b, double c) {
         // Returns the larger real root (used for projection), clamped finite.
         if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c)) return 0.0;
         if (std::abs(a) < 1e-18) {
@@ -426,7 +505,7 @@ namespace jmodels
         return std::isfinite(xr) ? xr : 0.0;
     }
 
-    double JModelMason::getEnergy(uint32 i) const
+    double JModelMasonHealing::getEnergy(uint32 i) const
     {
         double ret(0.0);
         if (!energies_)
@@ -440,7 +519,7 @@ namespace jmodels
         return ret;
     }
 
-    bool JModelMason::getEnergyAccumulate(uint32 i) const {
+    bool JModelMasonHealing::getEnergyAccumulate(uint32 i) const {
         // Returns TRUE if the corresponding energy is accumulated or FALSE otherwise.
         switch (i) {
         case kwETension:  return true; //Accumulate normal energy based on mode-I fracture energy
@@ -451,7 +530,7 @@ namespace jmodels
         return false;
     }
 
-    void JModelMason::setEnergy(uint32 i, const double& d) {
+    void JModelMasonHealing::setEnergy(uint32 i, const double& d) {
         // Set an energy value. 
         if (!energies_) return;
         switch (i) {
@@ -464,7 +543,51 @@ namespace jmodels
     }
 
 
-    void JModelMason::run(uint32 dim, State* s)
+    // ======================================================================
+    // applyHealing(): SIMPLIFIED 3-parameter recovery-time law.
+    //   eta(w,RT) = h_max * exp(-alpha*w) * (1 - exp(-RT/tau))
+    //   width  -> amplitude (ceiling);  tau -> single time constant.
+    // Damage reduced from the frozen episode baseline via the phase-field map
+    //   d_upd = 1 - sqrt((1-d_end)^2 + eta*[1-(1-d_end)^2]*Er)   per scalar.
+    // ======================================================================
+    void JModelMasonHealing::applyHealing()
+    {
+        const double w = heal_w_at_heal_;
+        const double tau = (heal_tau_ > 1e-9) ? heal_tau_ : 1e-9;
+
+        double Tt = 1.0 - std::exp(-heal_RT_ / tau);   // first-order saturation
+        if (Tt < 0.0) Tt = 0.0;
+        if (Tt > 1.0) Tt = 1.0;
+
+        double eta = heal_h_max_ * std::exp(-heal_alpha_ * w) * Tt;
+        if (eta < 0.0) eta = 0.0;
+        if (eta > 1.0) eta = 1.0;
+        heal_eta_last_ = eta;
+
+        const double Er = (heal_Er_ > 0.0) ? heal_Er_ : 0.0;
+        auto healScalar = [&](double d_end, double eff) -> double {
+            const double u2 = (1.0 - d_end) * (1.0 - d_end);
+            double hs = u2 + eff * (1.0 - u2) * Er;
+            if (hs < 0.0) hs = 0.0;
+            double du = 1.0 - std::sqrt(hs);
+            if (du < 0.0)   du = 0.0;
+            if (du > d_end) du = d_end;   // healing cannot exceed prior damage
+            return du;
+            };
+
+        // tensile and shear bond addressed by CaCO3 bridging; compression halved
+        dt = healScalar(heal_dt_end_, eta);        dt_hist = dt;
+        ds = healScalar(heal_ds_end_, eta);        ds_hist = ds;
+        dc = healScalar(heal_dc_end_, 0.5 * eta);  dc_hist = dc;
+
+        d_ts = clampDamage(dt + ds - dt * ds);
+        if (!std::isfinite(d_ts)) d_ts = 0.0;
+
+        cc = res_cohesion_ + (cohesion_ - res_cohesion_) * (1.0 - d_ts);
+        fc_current = compression_ * (1.0 - dc);
+    }
+
+    void JModelMasonHealing::run(uint32 dim, State* s)
     {
         JointModel::run(dim, s);
 
@@ -511,6 +634,43 @@ namespace jmodels
         double sn_ = fn_old / s->area_;
         double dsn_ = (fn_new - fn_old) / s->area_;  // trial elastic stress increment for branch selection
 
+        // ===================================================================
+        // SELF-HEALING TRIGGER  (condition-based, recovery-time accumulating)
+        // While a joint is damaged, narrow enough to bridge, and (optionally)
+        // unloaded, accrue resting time RT and reduce damage via the simplified
+        // healing law evaluated from a baseline frozen at episode entry. The
+        // damage-evolution laws below are guarded with (heal_enabled_ &&
+        // heal_resting_) so they cannot overwrite the healed state mid-rest.
+        // ===================================================================
+        if (heal_enabled_) {
+            const double w_now = std::abs(un_hist_ten);
+            const double dmax = std::max(std::max(dt_hist, ds_hist), dc_hist);
+            bool eligible = (dmax > heal_damage_threshold_) && (w_now < heal_w_max_);
+            if (eligible && heal_stress_threshold_ > 0.0)
+                eligible = (std::abs(sn_) < heal_stress_threshold_);
+            if (eligible) {
+                if (!heal_resting_) {                 // entering a rest episode
+                    heal_dt_end_ = dt_hist;
+                    heal_ds_end_ = ds_hist;
+                    heal_dc_end_ = dc_hist;
+                    heal_w_at_heal_ = w_now;
+                    heal_resting_ = true;
+                }
+                if (heal_time_scale_ > 0.0) heal_RT_ += heal_time_scale_;
+                applyHealing();
+            }
+            else if (heal_resting_) {               // reloaded -> episode ends
+                heal_n_cycles_ += 1.0;
+                heal_RT_ = 0.0;
+                heal_resting_ = false;
+            }
+        }
+        else if (heal_resting_) {
+            heal_n_cycles_ += 1.0;
+            heal_RT_ = 0.0;
+            heal_resting_ = false;
+        }
+
         constexpr double kEps = std::numeric_limits<double>::epsilon();
 
         //Calculate elastic limit
@@ -529,7 +689,7 @@ namespace jmodels
                 s->working_[D_un_hist] = un_hist_ten;
             }
 
-            
+
         }
 
         // --- TENSION BRANCH --------------------------------------------------
@@ -802,23 +962,25 @@ namespace jmodels
 
             //Define the softening on compressive strength
             if (s->state_ || jumptoDC) {
-                if ((un_current >= ucel_) && (un_current < ucul_)) {
-                    dc = (1 - (mid_comp / compression_)) * pow((un_current - ucel_) / (ucul_ - ucel_), 2);
-                    if (dn_ > 0.0) peak_normal = std::min(peak_normal, compression_ * (1 - dc));
-                }
-                else if (un_current >= ucul_) {
-                    double alpha = 2 * (mid_comp - compression_) / (ucul_ - ucel_);
-                    dc = 1 - (res_comp_ / compression_) - ((mid_comp - res_comp_) / compression_) * exp(alpha * (un_current - ucul_) / (mid_comp - res_comp_));
-                    if (dn_ > 0.0) peak_normal = std::min(peak_normal, compression_ * (1 - dc));
-                }
-                else {
-                    dc = 0.0;
-                }
-                // Clamp compressive damage to avoid infinite approach to 1
-                dc = clampDamage(dc);
-                dc_hist = clampDamage(dc_hist);
-                if (dc >= dc_hist) dc_hist = dc;
-                else dc = dc_hist;
+                if (!(heal_enabled_ && heal_resting_)) {  // skip damage recompute while healing
+                    if ((un_current >= ucel_) && (un_current < ucul_)) {
+                        dc = (1 - (mid_comp / compression_)) * pow((un_current - ucel_) / (ucul_ - ucel_), 2);
+                        if (dn_ > 0.0) peak_normal = std::min(peak_normal, compression_ * (1 - dc));
+                    }
+                    else if (un_current >= ucul_) {
+                        double alpha = 2 * (mid_comp - compression_) / (ucul_ - ucel_);
+                        dc = 1 - (res_comp_ / compression_) - ((mid_comp - res_comp_) / compression_) * exp(alpha * (un_current - ucul_) / (mid_comp - res_comp_));
+                        if (dn_ > 0.0) peak_normal = std::min(peak_normal, compression_ * (1 - dc));
+                    }
+                    else {
+                        dc = 0.0;
+                    }
+                    // Clamp compressive damage to avoid infinite approach to 1
+                    dc = clampDamage(dc);
+                    dc_hist = clampDamage(dc_hist);
+                    if (dc >= dc_hist) dc_hist = dc;
+                    else dc = dc_hist;
+                } // end self-healing guard (compression damage)
 
                 comp = compression_ * (1 - dc) * s->area_;
             }
@@ -834,7 +996,7 @@ namespace jmodels
         if (s->state_ && (tension_ > 0.0 || cohesion_ > 0.0))
         {
             bool sign = std::signbit(dn_);
-            if (sign && tension_ > 0.0) {
+            if (sign && tension_ > 0.0 && !(heal_enabled_ && heal_resting_)) {
                 if (iTension_d_) {
                     tP_ = s->normal_disp_ / (tension_ / kn_initial_);
                     dt = s->getYFromX(iTension_d_, tP_); //if table_dt is provided.
@@ -844,7 +1006,7 @@ namespace jmodels
                     dt = 1.0 - exp(-tension_ / G_I * (s->normal_disp_ - (tension_ / kn_initial_))); //Exponential Softening
                 }
             }// Update tensile stiffness BEFORE computing forces
-            
+
             if (dt_hist < dt) dt_hist = dt;
             else dt = dt_hist;
             // Clamp tensile damage to avoid infinite approach to 1
@@ -913,7 +1075,7 @@ namespace jmodels
 
                 ////Exponential Softening
                 // Only compute shear damage if there is cohesion to soften from
-                if (cohesion_ > 0.0) {
+                if (cohesion_ > 0.0 && !(heal_enabled_ && heal_resting_)) {
                     if (iShear_d_) {
                         sP_ = s->shear_disp_.mag() / usel;
                         ds = s->getYFromX(iShear_d_, sP_);
@@ -1148,7 +1310,7 @@ namespace jmodels
     }//run
 
 
-    bool JModelMason::tensionCorrection(State* s, uint32* IPlasticity, double& ten, bool& tenflag)
+    bool JModelMasonHealing::tensionCorrection(State* s, uint32* IPlasticity, double& ten, bool& tenflag)
     {
         if (IPlasticity) *IPlasticity = 1;
         s->state_ |= tension_now;
@@ -1175,17 +1337,17 @@ namespace jmodels
     }
 
 
-    void JModelMason::shearCorrection(State* s, uint32* IPlasticity, double& fsm, double& fsmax) {
+    void JModelMasonHealing::shearCorrection(State* s, uint32* IPlasticity, double& fsm, double& fsmax) {
         if (IPlasticity) *IPlasticity = 2;
         s->state_ |= slip_now;
         DVect3 fs_before = s->shear_force_;
         double rat = 0.0;
         if (fsm > 1e-30) rat = fsmax / fsm;
         s->shear_force_ *= rat;
-		s->shear_force_inc_ = DVect3(0, 0, 0); // reset increment since we directly set the shear force
+        s->shear_force_inc_ = DVect3(0, 0, 0); // reset increment since we directly set the shear force
     }
 
-    void JModelMason::compCorrection(State* s, uint32* IPlasticity, double& comp) {
+    void JModelMasonHealing::compCorrection(State* s, uint32* IPlasticity, double& comp) {
         if (IPlasticity) *IPlasticity = 3;
         s->state_ |= comp_now;
 
