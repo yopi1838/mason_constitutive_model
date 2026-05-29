@@ -15,7 +15,7 @@ extern "C" __declspec(dllexport) const char* getName()
 #ifdef JMODELDEBUG
     return "jmodelmasond";
 #else
-    return "jmodelmasonv1";
+    return "jmodelmasonv5";
 #endif
 }
 
@@ -136,7 +136,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "masond";
 #else
-        return "masonv1";
+        return "mason_v5";
 #endif
     }
 
@@ -145,7 +145,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "Mason Debug";
 #else
-        return "Masonv1";
+        return "Mason_v5";
 #endif
     }
 
