@@ -44,7 +44,7 @@ namespace jmodels
     }
     // Clamp damage variables in [0,1] and snap to 1 once they are "close enough"
     // to avoid asymptotic approach without ever numerically reaching 1.
-    #include <cmath> // ensure std::isfinite is available
+#include <cmath> // ensure std::isfinite is available
     inline double clampDamage(double v) {
         if (v <= 0.0) return 0.0;
         if (v >= 1.0 - 1e-8) return 1.0;
@@ -138,6 +138,7 @@ namespace jmodels
         , heal_dt_end_(0.0)
         , heal_ds_end_(0.0)
         , heal_dc_end_(0.0)
+        , heal_un_ref_(0.0)
     {
     }
 
@@ -179,9 +180,7 @@ namespace jmodels
             "table-dt    ,table-ds ,"
             "tensile-disp-plastic    ,shear-disp-plastic ,"
             "G_c, Cn, Cnn, Css, fc_current,  fric_current,   peak_ratio, ult_ratio,uel,un_hist_comp,peak_normal,ds_hist,"
-            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,"
-            "k_for_maxwell,nlimit,heal_enabled,heal_h_max,heal_alpha,heal_tau,heal_Er,heal_time_scale,heal_damage_threshold,"
-            "heal_stress_threshold,heal_w_max,heal_RT,heal_n_cycles,heal_resting,heal_eta_last,heal_w_at_heal,heal_dt_end,heal_ds_end,heal_dc_end");
+            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,k_for_maxwell,nlimit,heal_enabled,heal_h_max,heal_alpha,heal_tau,heal_Er,heal_time_scale,heal_damage_threshold,heal_stress_threshold,heal_w_max,heal_RT,heal_n_cycles,heal_resting,heal_eta_last,heal_w_at_heal,heal_dt_end,heal_ds_end,heal_dc_end,heal_un_ref");
     }
 
     string JModelMasonHealing::getStates() const
@@ -259,6 +258,7 @@ namespace jmodels
         case 64: return heal_dt_end_;
         case 65: return heal_ds_end_;
         case 66: return heal_dc_end_;
+        case 67: return heal_un_ref_;
         }
         return 0.0;
     }
@@ -334,6 +334,7 @@ namespace jmodels
         case 64: heal_dt_end_ = prop.to<double>(); break;
         case 65: heal_ds_end_ = prop.to<double>(); break;
         case 66: heal_dc_end_ = prop.to<double>(); break;
+        case 67: heal_un_ref_ = prop.to<double>(); break;
         }
     }
 
@@ -417,6 +418,7 @@ namespace jmodels
         heal_dt_end_ = mm->heal_dt_end_;
         heal_ds_end_ = mm->heal_ds_end_;
         heal_dc_end_ = mm->heal_dc_end_;
+        heal_un_ref_ = mm->heal_un_ref_;
     }
 
     void JModelMasonHealing::initialize(uint32 dim, State* s)
@@ -654,6 +656,10 @@ namespace jmodels
                     heal_ds_end_ = ds_hist;
                     heal_dc_end_ = dc_hist;
                     heal_w_at_heal_ = w_now;
+                    // physical opening where the precipitate bridges the crack:
+                    // becomes the new unstressed / zero-damage mode-I reference,
+                    // so healing persists on reload even if the crack stays open.
+                    heal_un_ref_ = (s->normal_disp_ > 0.0) ? s->normal_disp_ : 0.0;
                     heal_resting_ = true;
                 }
                 if (heal_time_scale_ > 0.0) heal_RT_ += heal_time_scale_;
@@ -997,13 +1003,18 @@ namespace jmodels
         {
             bool sign = std::signbit(dn_);
             if (sign && tension_ > 0.0 && !(heal_enabled_ && heal_resting_)) {
+                // Opening measured from the healed reference: 0 for a virgin
+                // joint (heal_un_ref_ = 0), and shifted by the crack width that
+                // was bridged by healing otherwise. This stops the absolute
+                // opening from re-deriving the pre-heal damage on reload.
+                const double un_heal = s->normal_disp_ - heal_un_ref_;
                 if (iTension_d_) {
-                    tP_ = s->normal_disp_ / (tension_ / kn_initial_);
+                    tP_ = un_heal / (tension_ / kn_initial_);
                     dt = s->getYFromX(iTension_d_, tP_); //if table_dt is provided.
                 }
                 else if (std::isfinite(G_I) && G_I > 0.0) {
-                    tP_ = s->normal_disp_ - (tension_ / kn_initial_);
-                    dt = 1.0 - exp(-tension_ / G_I * (s->normal_disp_ - (tension_ / kn_initial_))); //Exponential Softening
+                    tP_ = un_heal - (tension_ / kn_initial_);
+                    dt = 1.0 - exp(-tension_ / G_I * (un_heal - (tension_ / kn_initial_))); //Exponential Softening (from healed reference)
                 }
             }// Update tensile stiffness BEFORE computing forces
 
