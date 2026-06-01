@@ -139,6 +139,7 @@ namespace jmodels
         , heal_ds_end_(0.0)
         , heal_dc_end_(0.0)
         , heal_un_ref_(0.0)
+        , heal_us_ref_(0.0)
     {
     }
 
@@ -180,7 +181,7 @@ namespace jmodels
             "table-dt    ,table-ds ,"
             "tensile-disp-plastic    ,shear-disp-plastic ,"
             "G_c, Cn, Cnn, Css, fc_current,  fric_current,   peak_ratio, ult_ratio,uel,un_hist_comp,peak_normal,ds_hist,"
-            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,k_for_maxwell,nlimit,heal_enabled,heal_h_max,heal_alpha,heal_tau,heal_Er,heal_time_scale,heal_damage_threshold,heal_stress_threshold,heal_w_max,heal_RT,heal_n_cycles,heal_resting,heal_eta_last,heal_w_at_heal,heal_dt_end,heal_ds_end,heal_dc_end,heal_un_ref");
+            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,k_for_maxwell,nlimit,heal_enabled,heal_h_max,heal_alpha,heal_tau,heal_Er,heal_time_scale,heal_damage_threshold,heal_stress_threshold,heal_w_max,heal_RT,heal_n_cycles,heal_resting,heal_eta_last,heal_w_at_heal,heal_dt_end,heal_ds_end,heal_dc_end,heal_un_ref,heal_us_ref");
     }
 
     string JModelMasonHealing::getStates() const
@@ -259,6 +260,7 @@ namespace jmodels
         case 65: return heal_ds_end_;
         case 66: return heal_dc_end_;
         case 67: return heal_un_ref_;
+        case 68: return heal_us_ref_;
         }
         return 0.0;
     }
@@ -335,6 +337,7 @@ namespace jmodels
         case 65: heal_ds_end_ = prop.to<double>(); break;
         case 66: heal_dc_end_ = prop.to<double>(); break;
         case 67: heal_un_ref_ = prop.to<double>(); break;
+        case 68: heal_us_ref_ = prop.to<double>(); break;
         }
     }
 
@@ -419,6 +422,7 @@ namespace jmodels
         heal_ds_end_ = mm->heal_ds_end_;
         heal_dc_end_ = mm->heal_dc_end_;
         heal_un_ref_ = mm->heal_un_ref_;
+        heal_us_ref_ = mm->heal_us_ref_;
     }
 
     void JModelMasonHealing::initialize(uint32 dim, State* s)
@@ -566,6 +570,17 @@ namespace jmodels
         if (eta > 1.0) eta = 1.0;
         heal_eta_last_ = eta;
 
+        // --- STRENGTH recovery (not just stiffness) --------------------------
+        // Rewind the tensile softening origin by the eta-fraction of the crack
+        // width the precipitate bridged (heal_w_at_heal_, frozen at episode entry).
+        // On reload un_heal = normal_disp_ - heal_un_ref_, so the softening law
+        // re-derives damage only AFTER the crack reopens past eta*(bridged width):
+        // the healed bond re-mobilises a recovered STRENGTH before re-softening,
+        // scaled by the same eta as the dt/ds damage rollback below. (Mode-II/
+        // shear uses the entry-frozen heal_us_ref_; for shear-dominated cases give
+        // it the same eta-scaling, which needs a frozen-slip member.)
+        heal_un_ref_ = eta * heal_w_at_heal_;
+
         const double Er = (heal_Er_ > 0.0) ? heal_Er_ : 0.0;
         auto healScalar = [&](double d_end, double eff) -> double {
             const double u2 = (1.0 - d_end) * (1.0 - d_end);
@@ -580,7 +595,9 @@ namespace jmodels
         // tensile and shear bond addressed by CaCO3 bridging; compression halved
         dt = healScalar(heal_dt_end_, eta);        dt_hist = dt;
         ds = healScalar(heal_ds_end_, eta);        ds_hist = ds;
-        dc = healScalar(heal_dc_end_, 0.5 * eta);  dc_hist = dc;
+        // compression is NOT healed: crushing is irreversible, so dc is held at
+        // the value frozen on episode entry (no recovery).
+        dc = heal_dc_end_;                         dc_hist = dc;
 
         d_ts = clampDamage(dt + ds - dt * ds);
         if (!std::isfinite(d_ts)) d_ts = 0.0;
@@ -656,10 +673,16 @@ namespace jmodels
                     heal_ds_end_ = ds_hist;
                     heal_dc_end_ = dc_hist;
                     heal_w_at_heal_ = w_now;
-                    // physical opening where the precipitate bridges the crack:
-                    // becomes the new unstressed / zero-damage mode-I reference,
-                    // so healing persists on reload even if the crack stays open.
-                    heal_un_ref_ = (s->normal_disp_ > 0.0) ? s->normal_disp_ : 0.0;
+                    // mode-I reference is set in applyHealing() each rest cycle as
+                    // eta * heal_w_at_heal_ (eta-scaled strength recovery), so it grows
+                    // with RT. Start at 0 (no shift) before the first heal call.
+                    heal_un_ref_ = 0.0;
+                    // mode-II analog: freeze the shear-slip magnitude at episode
+                    // entry so healed shear damage is re-derived from this reference
+                    // on reload, not from the absolute (large) accumulated slip.
+                    // shear_disp_ is a DVect3; .mag() drops direction -> exact for
+                    // monotonic re-shear, approximate under shear reversal.
+                    heal_us_ref_ = s->shear_disp_.mag();
                     heal_resting_ = true;
                 }
                 if (heal_time_scale_ > 0.0) heal_RT_ += heal_time_scale_;
@@ -1087,13 +1110,18 @@ namespace jmodels
                 ////Exponential Softening
                 // Only compute shear damage if there is cohesion to soften from
                 if (cohesion_ > 0.0 && !(heal_enabled_ && heal_resting_)) {
+                    // Slip measured from the healed reference (mode-II analog of
+                    // un_heal): 0 for a virgin joint (heal_us_ref_ = 0), shifted by
+                    // the slip bridged at healing otherwise. Stops the absolute slip
+                    // from re-deriving the pre-heal shear damage on reload.
+                    const double us_heal = std::max(0.0, s->shear_disp_.mag() - heal_us_ref_);
                     if (iShear_d_) {
-                        sP_ = s->shear_disp_.mag() / usel;
+                        sP_ = us_heal / usel;
                         ds = s->getYFromX(iShear_d_, sP_);
                     }
                     else if (std::isfinite(G_II) && G_II > 0.0) {
-                        sP_ = s->shear_disp_.mag() - usel;
-                        ds = 1 - exp(-cohesion_ / G_II * (s->shear_disp_.mag() - usel));
+                        sP_ = us_heal - usel;
+                        ds = 1 - exp(-cohesion_ / G_II * (us_heal - usel));
                     }
                 }
                 if (ds >= ds_hist) ds_hist = ds;

@@ -183,6 +183,7 @@ namespace jmodels
         double heal_ds_end_;           // shear   damage frozen at episode entry
         double heal_dc_end_;           // compr.  damage frozen at episode entry
         double heal_un_ref_;           // physical opening where healed material formed (mode-I reference shift)
+        double heal_us_ref_;           // shear-slip magnitude where healed material formed (mode-II reference shift)
 
         // Structure to store the energies. 
         struct Energies {
