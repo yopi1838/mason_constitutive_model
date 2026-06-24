@@ -15,7 +15,7 @@ extern "C" __declspec(dllexport) const char* getName()
 #ifdef JMODELDEBUG
     return "jmodelmasond";
 #else
-    return "jmodelmasonv5";
+    return "jmodelmason_v6";
 #endif
 }
 
@@ -120,7 +120,7 @@ namespace jmodels
         dil_hist(0),
         ddil(0),
         kn_for_maxwell_(0),
-		nlimit(0)
+        nlimit(0)
     {
     }
 
@@ -136,7 +136,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "masond";
 #else
-        return "mason_v5";
+        return "mason_v6";
 #endif
     }
 
@@ -145,7 +145,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "Mason Debug";
 #else
-        return "Mason_v5";
+        return "Mason_v6";
 #endif
     }
 
@@ -222,7 +222,7 @@ namespace jmodels
         case 46: return ddil;
         case 47: return reloadFlag;
         case 48: return kn_for_maxwell_;
-		case 49: return nlimit;
+        case 49: return nlimit;
         }
         return 0.0;
     }
@@ -280,7 +280,7 @@ namespace jmodels
         case 46: ddil = prop.to<double>(); break;
         case 47: reloadFlag = prop.to<double>(); break;
         case 48: kn_for_maxwell_ = prop.to<double>(); break;
-		case 49: nlimit = prop.to<double>(); break;
+        case 49: nlimit = prop.to<double>(); break;
         }
     }
 
@@ -343,7 +343,7 @@ namespace jmodels
         ddil = mm->ddil;
         reloadFlag = mm->reloadFlag;
         kn_for_maxwell_ = mm->kn_for_maxwell_;
-		nlimit = mm->nlimit;
+        nlimit = mm->nlimit;
         Cnn = mm->Cnn;
         Css = mm->Css;
         Cn = mm->Cn;
@@ -529,7 +529,7 @@ namespace jmodels
                 s->working_[D_un_hist] = un_hist_ten;
             }
 
-            
+
         }
 
         // --- TENSION BRANCH --------------------------------------------------
@@ -844,7 +844,7 @@ namespace jmodels
                     dt = 1.0 - exp(-tension_ / G_I * (s->normal_disp_ - (tension_ / kn_initial_))); //Exponential Softening
                 }
             }// Update tensile stiffness BEFORE computing forces
-            
+
             if (dt_hist < dt) dt_hist = dt;
             else dt = dt_hist;
             // Clamp tensile damage to avoid infinite approach to 1
@@ -1116,7 +1116,15 @@ namespace jmodels
             const bool tensile_history =
                 (tension_ > 0.0) && ((un_new < -uel_t) || (un_hist_ten < -uel_t));
             if (tensile_history) {
-                const double kn_min = std::max(1e-12, nlimit * kn_initial_);
+                // FORCE-PATH floor only: kn_ feeds the tension force branch
+                // (kna_t = kn_ * area) and must be free to decay with mode-I
+                // damage down to a numerical epsilon. Applying the nlimit floor
+                // here left a residual stiffness on a fully open contact
+                // (dt -> 1), which injected a spurious tensile force on opening:
+                // the stiffness drop seen in the hysteretic loops and the block
+                // uplift during rocking. The nlimit floor now lives ONLY on the
+                // Maxwell feed below.
+                const double kn_min = 1e-12;          // numerical epsilon, NOT nlimit*kn_initial_
                 const double kn_max = kn_initial_;
                 const double dt_eff = std::min(std::max(dt, 0.0), 1.0);   // dt, NOT d_ts
                 const double denom = std::max(std::abs(un_hist_ten), 1e-9);
@@ -1132,11 +1140,31 @@ namespace jmodels
 
         // Operating normal stiffness reported via getMaxNormalStiffness()
         // (timestep + Maxwell damping): the per-state value, not the raw secant.
-        // Compression responds at ~kn_initial_ so it is damped properly; open
-        // tension carries the dt-driven secant.
-        kn_for_maxwell_ = (un_current >= 0.0)
+        // The nlimit floor is applied HERE, decoupled from the force-path kn_,
+        // so stiffness-proportional (Maxwell) damping and the explicit timestep
+        // stay stable even when the force-path kn_ has decayed to ~epsilon on a
+        // fully open contact. Compression responds at ~kn_initial_ so it is
+        // damped properly; open tension carries the dt-driven secant, floored
+        // at nlimit*kn_initial_ for damping stability only.
+        const double kn_maxwell_min = std::max(1e-12, nlimit * kn_initial_);
+        // Open-contact damping stiffness. For a BONDED joint (tension_ > 0) the
+        // damping feed tracks the dt-driven force-path secant kn_, which decays
+        // from kn_initial_ toward the nlimit floor as the joint cracks. For an
+        // UNBONDED / freshly generated contact (tension_ == 0, e.g. new contacts
+        // formed during rocking in large-strain) the open contact carries no
+        // real normal stiffness, so its damping feed collapses to the SAME
+        // nlimit floor instead of full kn_initial_. This keeps the Maxwell
+        // stiffness of open contacts controlled by nlimit CONSISTENTLY, whether
+        // they are original cracked joints or newly generated tension-free
+        // contacts, so nlimit is a single tunable knob for how much
+        // stiffness-proportional damping open contacts carry. (No timestep
+        // penalty: the explicit timestep is governed by the stiffest CLOSED
+        // contacts at kn_initial_, not by open ones.)
+        const double kn_open_feed = (tension_ > 0.0) ? kn_ : kn_maxwell_min;
+        kn_for_maxwell_ = std::max(kn_maxwell_min,
+            (un_current >= 0.0)
             ? kn_initial_ * (1.0 - dc)   // compression: ~elastic (dc~0 without crushing)
-            : kn_;                         // tension: secant stiffness (dt-driven)
+            : kn_open_feed);             // open: bonded secant (tension>0) or nlimit floor (tension=0)
         // At end of run()
         if (std::isnan(s->normal_force_)) {
             throw std::runtime_error("NaN detected in JModelYopi::run normal side");
@@ -1182,7 +1210,7 @@ namespace jmodels
         double rat = 0.0;
         if (fsm > 1e-30) rat = fsmax / fsm;
         s->shear_force_ *= rat;
-		s->shear_force_inc_ = DVect3(0, 0, 0); // reset increment since we directly set the shear force
+        s->shear_force_inc_ = DVect3(0, 0, 0); // reset increment since we directly set the shear force
     }
 
     void JModelMason::compCorrection(State* s, uint32* IPlasticity, double& comp) {
