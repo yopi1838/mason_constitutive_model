@@ -15,7 +15,7 @@ extern "C" __declspec(dllexport) const char* getName()
 #ifdef JMODELDEBUG
     return "jmodelmasond";
 #else
-    return "jmodelmason_v6";
+    return "jmodelmason";
 #endif
 }
 
@@ -136,7 +136,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "masond";
 #else
-        return "mason_v6";
+        return "mason_v7";
 #endif
     }
 
@@ -145,7 +145,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "Mason Debug";
 #else
-        return "Mason_v6";
+        return "Mason_v7";
 #endif
     }
 
@@ -550,18 +550,32 @@ namespace jmodels
                 }
             }
             else {
-                // Softening tension joint: use degraded kn_
+                // Softening tension joint: use the damage-degraded secant kn_
+                // ONLY while the contact stays open (un < 0). When it re-closes
+                // past zero within the step, the compression portion must use
+                // full kn_initial_ (paper degrades stiffness only for un < 0;
+                // compression re-engagement is always elastic). Mirrors the
+                // tension_ <= 0.0 branch above. Without this, a tensile-damaged
+                // joint re-engaging in compression is artificially soft on the
+                // zero-crossing step (severe in v6 where kn_ decays to ~0),
+                // producing excess deformability / spurious excursions.
 
                 // update tensile history as before
                 if (dn_ < 0.0 && un_current <= un_hist_ten) {
                     un_hist_ten = un_current;
                     s->working_[D_un_hist] = un_hist_ten;
                 }
-                // Check if closing back into compression this step
-                // Purely in tension
-                const double kna_t = kn_ * s->area_;
-                double dfn_t = kna_t * dn_;
-                fn_new += dfn_t;
+                if (dn_ > 0.0 && un_new >= 0.0) {
+                    // Closing past zero: full stiffness for the compression portion
+                    double dn_comp = un_new;
+                    fn_new = kn_initial_ * s->area_ * dn_comp;
+                }
+                else {
+                    // Still open (or opening further): degraded tensile secant
+                    const double kna_t = kn_ * s->area_;
+                    double dfn_t = kna_t * dn_;
+                    fn_new += dfn_t;
+                }
             }
         }
         else {//COMPRESSION BRANCH --------------------------------------------------
