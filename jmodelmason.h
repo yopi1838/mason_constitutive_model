@@ -157,7 +157,8 @@ namespace jmodels
         double dil_hist;
         double ddil;
         double kn_for_maxwell_; //Maxwell stiffness feed to dynamic loading sequence
-		double nlimit; //Limit for n to avoid numerical issues
+		double nlimit1; //Limit for n to avoid spurious kn_ drop
+		double nlimit2; //Limit for n to avoid damping problem in maxwell based damping.
 
         // Structure to store the energies. 
         struct Energies {

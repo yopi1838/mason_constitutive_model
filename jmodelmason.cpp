@@ -120,7 +120,8 @@ namespace jmodels
         dil_hist(0),
         ddil(0),
         kn_for_maxwell_(0),
-        nlimit(0)
+        nlimit1(0),
+        nlimit2(0)
     {
     }
 
@@ -136,7 +137,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "masond";
 #else
-        return "mason_v7";
+        return "mason_v5";
 #endif
     }
 
@@ -145,7 +146,7 @@ namespace jmodels
 #ifdef JMODELDEBUG
         return "Mason Debug";
 #else
-        return "Mason_v7";
+        return "Mason_v5";
 #endif
     }
 
@@ -162,7 +163,7 @@ namespace jmodels
             "table-dt    ,table-ds ,"
             "tensile-disp-plastic    ,shear-disp-plastic ,"
             "G_c, Cn, Cnn, Css, fc_current,  fric_current,   peak_ratio, ult_ratio,uel,un_hist_comp,peak_normal,ds_hist,"
-            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,k_for_maxwell,nlimit");
+            "un_reloading,fm_reloading,un_hist_ten, dt_hist,dc_hist,delta,dilation_current,un_dilatant,dil_hist,ddil,reloadFlag,k_for_maxwell,nlimit1,nlimit2");
     }
 
     string JModelMason::getStates() const
@@ -222,7 +223,8 @@ namespace jmodels
         case 46: return ddil;
         case 47: return reloadFlag;
         case 48: return kn_for_maxwell_;
-        case 49: return nlimit;
+        case 49: return nlimit1;
+        case 50: return nlimit2;
         }
         return 0.0;
     }
@@ -280,7 +282,8 @@ namespace jmodels
         case 46: ddil = prop.to<double>(); break;
         case 47: reloadFlag = prop.to<double>(); break;
         case 48: kn_for_maxwell_ = prop.to<double>(); break;
-        case 49: nlimit = prop.to<double>(); break;
+        case 49: nlimit1 = prop.to<double>(); break;
+        case 50: nlimit2 = prop.to<double>(); break;
         }
     }
 
@@ -343,7 +346,8 @@ namespace jmodels
         ddil = mm->ddil;
         reloadFlag = mm->reloadFlag;
         kn_for_maxwell_ = mm->kn_for_maxwell_;
-        nlimit = mm->nlimit;
+        nlimit1 = mm->nlimit1;
+        nlimit2 = mm->nlimit2;
         Cnn = mm->Cnn;
         Css = mm->Css;
         Cn = mm->Cn;
@@ -487,7 +491,8 @@ namespace jmodels
         //double kna = kn_ * s->area_;
         double ksa = ks_ * s->area_;
         double kn_comp_ = kn_initial_;
-        if (!nlimit) nlimit = 1e-6;
+        if (!nlimit1) nlimit1 = 1e-8;   // force-path kn_ floor: ~free decay by default
+        if (!nlimit2) nlimit2 = 1e-6;   // k_for_maxwell (damping) floor
         if (!s->state_) {
             s->working_[Dqs] = 0.0;
             s->working_[Dqt] = 0.0;
@@ -1130,15 +1135,15 @@ namespace jmodels
             const bool tensile_history =
                 (tension_ > 0.0) && ((un_new < -uel_t) || (un_hist_ten < -uel_t));
             if (tensile_history) {
-                // FORCE-PATH floor only: kn_ feeds the tension force branch
-                // (kna_t = kn_ * area) and must be free to decay with mode-I
-                // damage down to a numerical epsilon. Applying the nlimit floor
-                // here left a residual stiffness on a fully open contact
-                // (dt -> 1), which injected a spurious tensile force on opening:
-                // the stiffness drop seen in the hysteretic loops and the block
-                // uplift during rocking. The nlimit floor now lives ONLY on the
-                // Maxwell feed below.
-                const double kn_min = 1e-12;          // numerical epsilon, NOT nlimit*kn_initial_
+                // FORCE-PATH floor (nlimit1): kn_ feeds the tension force branch
+                // (kna_t = kn_ * area). nlimit1 sets how far kn_ may decay with
+                // mode-I damage. Set nlimit1 ~ 0 for free decay (no residual
+                // tensile stiffness on a fully open contact); raise it to keep a
+                // small tensile stiffness, which is favourable for dynamics.
+                // This floor is INDEPENDENT of the Maxwell floor (nlimit2) below,
+                // but because k_for_maxwell_ is derived from kn_, raising nlimit1
+                // also lifts the open-contact damping feed.
+                const double kn_min = std::max(1e-12, nlimit1 * kn_initial_);  // FORCE-PATH floor (nlimit1)
                 const double kn_max = kn_initial_;
                 const double dt_eff = std::min(std::max(dt, 0.0), 1.0);   // dt, NOT d_ts
                 const double denom = std::max(std::abs(un_hist_ten), 1e-9);
@@ -1160,7 +1165,7 @@ namespace jmodels
         // fully open contact. Compression responds at ~kn_initial_ so it is
         // damped properly; open tension carries the dt-driven secant, floored
         // at nlimit*kn_initial_ for damping stability only.
-        const double kn_maxwell_min = std::max(1e-12, nlimit * kn_initial_);
+        const double kn_maxwell_min = std::max(1e-12, nlimit2 * kn_initial_);  // DAMPING floor (nlimit2)
         // Open-contact damping stiffness. For a BONDED joint (tension_ > 0) the
         // damping feed tracks the dt-driven force-path secant kn_, which decays
         // from kn_initial_ toward the nlimit floor as the joint cracks. For an
@@ -1168,9 +1173,9 @@ namespace jmodels
         // formed during rocking in large-strain) the open contact carries no
         // real normal stiffness, so its damping feed collapses to the SAME
         // nlimit floor instead of full kn_initial_. This keeps the Maxwell
-        // stiffness of open contacts controlled by nlimit CONSISTENTLY, whether
+        // stiffness of open contacts controlled by nlimit2 CONSISTENTLY, whether
         // they are original cracked joints or newly generated tension-free
-        // contacts, so nlimit is a single tunable knob for how much
+        // contacts, so nlimit2 is the tunable knob for how much
         // stiffness-proportional damping open contacts carry. (No timestep
         // penalty: the explicit timestep is governed by the stiffest CLOSED
         // contacts at kn_initial_, not by open ones.)
